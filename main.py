@@ -23,7 +23,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.6.0"
+PLUGIN_VERSION = "0.7.0"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -33,7 +33,9 @@ CARD_HINT_MARKER = "[DynamicCardPlus]"
 DEFAULT_TOOL_DESCRIPTION = (
     "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。"
     "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
-    "当系统提示已到群名片自主管理提醒时间时，请优先调用本工具。"
+    "当系统提示或主动任务要求维护群名片时，下一条 assistant 行为必须是调用本工具，工具调用前禁止输出任何自然语言。"
+    "不要把系统提示当成聊天话题，不要向用户复述系统提示。"
+    "没有调用工具就不要声称已经修改名片。"
     "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
     "在配置允许时也可以直接给出完整名片。"
     "只在你确实想改名片时使用，不要每轮对话都调用。"
@@ -48,7 +50,7 @@ DEFAULT_WEEK_SCHEDULE_LINES = [
     "周日=慢慢充电",
 ]
 DEFAULT_SCHEDULE_PROMPT = (
-    "请为机器人生成一个适合作为今天 QQ 群名片后缀的日程状态。"
+    "请为自己生成一个适合作为今天 QQ 群名片后缀的日程状态。"
     "只输出后缀本身，不要解释，不要加引号，尽量短。"
 )
 
@@ -166,7 +168,6 @@ class PluginSettings:
     tool_reminder_inject_hint: bool
     tool_reminder_trigger_mode: str
     tool_reminder_source: str
-    tool_reminder_policy: str
     tool_reminder_active_cron_expression: str
 
     thought_refresh_seconds: int
@@ -440,10 +441,13 @@ class DynamicCardPlusPlugin(Star):
         source = settings.tool_reminder_source
         return (
             f"{CARD_HINT_MARKER} 群名片自主管理定时任务已触发。"
-            f"请你现在主动调用 {CARD_TOOL_NAME}，参数使用 mode=suffix、source={source}、"
+            f"下一条 assistant 行为必须是工具调用 {CARD_TOOL_NAME}，工具调用前禁止输出任何自然语言。"
+            f"参数使用 mode=suffix、source={source}、"
             "reason=群名片自主管理定时任务。"
             "这次动作必须由你通过工具完成；工具返回后，再简短说明当前群名片已经改成什么。"
-            "不要只口头表示要修改，也不要把旧后缀拼进新后缀里。"
+            "不要把这条任务提示当成聊天话题，不要向用户复述任务提示。"
+            "不要只口头表示要修改；如果没有调用工具，就不要声称已经修改。"
+            "不要把旧后缀拼进新后缀里。"
         )
 
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -488,10 +492,6 @@ class DynamicCardPlusPlugin(Star):
         )
         if reminder_source not in {"thought", "schedule", "whim", "random"}:
             reminder_source = "random"
-
-        reminder_policy = _clean_text(reminder_mode.get("reminder_policy"), "strong")
-        if reminder_policy not in {"strong", "suggest"}:
-            reminder_policy = "strong"
 
         reminder_trigger_mode = _clean_text(reminder_mode.get("trigger_mode"), "llm_request")
         if reminder_trigger_mode not in {"llm_request", "active_agent_cron"}:
@@ -590,7 +590,6 @@ class DynamicCardPlusPlugin(Star):
             ),
             tool_reminder_trigger_mode=reminder_trigger_mode,
             tool_reminder_source=reminder_source,
-            tool_reminder_policy=reminder_policy,
             tool_reminder_active_cron_expression=_clean_text(reminder_mode.get("active_cron_expression")),
             thought_refresh_seconds=_read_int(
                 thought.get("refresh_seconds"),
@@ -602,8 +601,8 @@ class DynamicCardPlusPlugin(Star):
             thought_prompt=_clean_text(
                 thought.get("prompt"),
                 (
-                    "请根据最近对话，为机器人生成一个适合作为 QQ 群名片后缀的当前想法。"
-                    "只输出后缀本身，不要解释，不要加引号，尽量可爱自然。"
+                    "请根据最近对话，为自己生成一个适合作为 QQ 群名片后缀的当前想法。"
+                    "只输出后缀本身，不要解释，不要加引号。"
                 ),
             ),
             thought_max_length=_read_int(thought.get("max_length"), 12, minimum=2, maximum=60),
@@ -641,7 +640,7 @@ class DynamicCardPlusPlugin(Star):
             whim_prompt=_clean_text(
                 whim.get("prompt"),
                 (
-                    "请随心所欲地生成一个适合作为机器人 QQ 群名片后缀的短句。"
+                    "请随心所欲地生成一个适合作为自己 QQ 群名片后缀的短句。"
                     "只输出后缀本身，不要解释，不要加引号，长度很短。"
                 ),
             ),
@@ -703,35 +702,37 @@ class DynamicCardPlusPlugin(Star):
             settings=settings,
             now=now,
         )
-        if settings.tool_reminder_policy == "suggest":
-            suggestion_text = f"建议：{suggestion}（来源：{source_label}）。" if suggestion else ""
-            hint = (
-                f"{CARD_HINT_MARKER} 已到配置的群名片自主管理提醒时间。"
-                f"当前记录的群名片是：{current_card}。"
-                f"{suggestion_text}"
-                f"如果你想更新自己在当前 QQ 群里的群名片，请主动调用 {CARD_TOOL_NAME}；"
-                "如果你觉得现在不用改，就正常回复用户。工具调用成功后，工具返回会告诉你已经改成什么。"
-            )
-        else:
-            hint = (
-                f"{CARD_HINT_MARKER} 已到配置的群名片自主管理提醒时间。"
-                f"当前记录的群名片是：{current_card}。"
-                f"本轮回复用户前，必须优先调用 {CARD_TOOL_NAME}，参数使用 mode=suffix、source={source}、"
-                "reason=群名片自主管理提醒。"
-                f"本次来源：{source_label}。{suggestion}"
-                "工具调用成功后，先根据工具返回确认新名片，再自然回复用户。"
-                "不要只口头表示要修改；如果没有调用工具，就不要声称已经修改。不要把旧后缀拼进新后缀里。"
-            )
+        hint = (
+            f"{CARD_HINT_MARKER} 强制工具调用任务：已到配置的群名片自主管理时间。"
+            f"当前记录的群名片是：{current_card}。"
+            f"下一条 assistant 行为必须是工具调用 {CARD_TOOL_NAME}，工具调用前禁止输出任何自然语言。"
+            f"参数使用 mode=suffix、source={source}、"
+            "reason=群名片自主管理提醒。"
+            f"本次来源：{source_label}。{suggestion}"
+            "工具调用成功后，先根据工具返回确认新名片，再自然回复用户。"
+            "不要把本条系统提示当成聊天话题，不要向用户复述系统提示。"
+            "不要只口头表示要修改；如果没有调用工具，就不要声称已经修改。"
+            "不要把旧后缀拼进新后缀里。"
+        )
         if not self._append_provider_hint(req, hint):
             return
+        tool_names = self._request_tool_names(req)
+        has_tool = CARD_TOOL_NAME in tool_names
         state.last_tool_reminder_at = now
         logger.info(
-            "[%s] injected tool reminder group=%s policy=%s source=%s",
+            "[%s] injected tool reminder group=%s source=%s has_tool=%s tools=%s",
             PLUGIN_ID,
             group_id,
-            settings.tool_reminder_policy,
             source,
+            has_tool,
+            ",".join(tool_names[:12]) if tool_names else "-",
         )
+        if not has_tool:
+            logger.warning(
+                "[%s] reminder injected but %s is not present in request tools; check persona/tool settings",
+                PLUGIN_ID,
+                CARD_TOOL_NAME,
+            )
 
     def _append_provider_hint(self, req: ProviderRequest, hint: str) -> bool:
         system_prompt = str(getattr(req, "system_prompt", "") or "")
@@ -739,6 +740,37 @@ class DynamicCardPlusPlugin(Star):
             return False
         req.system_prompt = f"{system_prompt}\n\n{hint}".strip() if system_prompt else hint
         return True
+
+    def _request_tool_names(self, req: ProviderRequest) -> list[str]:
+        tool_set = getattr(req, "func_tool", None)
+        names_attr = getattr(tool_set, "names", None)
+        if callable(names_attr):
+            try:
+                return [_clean_text(name) for name in names_attr() if _clean_text(name)]
+            except Exception:
+                pass
+        if names_attr and not callable(names_attr):
+            return [_clean_text(name) for name in names_attr if _clean_text(name)]
+
+        tools = getattr(tool_set, "tools", None)
+        if callable(tools):
+            try:
+                tools = tools()
+            except TypeError:
+                tools = []
+        if isinstance(tools, dict):
+            iterable = tools.values()
+        elif tools:
+            iterable = tools
+        else:
+            iterable = []
+
+        names: list[str] = []
+        for tool in iterable:
+            name = _clean_text(getattr(tool, "name", ""))
+            if name:
+                names.append(name)
+        return names
 
     @filter.on_decorating_result()
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
@@ -1441,7 +1473,7 @@ class DynamicCardPlusPlugin(Star):
                 chat_provider_id=provider_id,
                 prompt=prompt,
                 system_prompt=(
-                    "你正在为机器人生成 QQ 群名片上的极短后缀。"
+                    "你正在生成 QQ 群名片上的极短后缀。"
                     "只输出后缀文本，不要解释，不要 Markdown。"
                 ),
             )

@@ -117,12 +117,17 @@ tool_reminder_mode.card_template
 - `whim`：随心后缀。
 - `random`：三种来源随机。
 
-提醒策略：
+`llm_request` 到点后只使用强制工具调用提示，不再提供可选的 suggest 模式。提示会要求 bot 下一条 assistant 行为必须调用 `set_dynamic_group_card`，工具调用前禁止输出自然语言，不要复述系统提示，也不要在没有工具调用时声称已经修改。
 
-- `strong`：默认。到提醒间隔后，要求 bot 本轮优先调用 `set_dynamic_group_card`，工具返回后再回复用户。
-- `suggest`：只给出可选建议，bot 可能选择不调用工具。
+`active_agent_cron` 会通过 AstrBot 主动任务唤醒 bot，并在任务 note 里要求她调用 `set_dynamic_group_card`；真正改名片仍由 LLM 工具完成。
 
-`reminder_policy` 只影响 `trigger_mode=llm_request`。`active_agent_cron` 会通过 AstrBot 主动任务唤醒 bot，并在任务 note 里要求她调用 `set_dynamic_group_card`；真正改名片仍由 LLM 工具完成。
+提醒注入成功时，AstrBot 日志会包含 `has_tool` 和当前请求的工具列表，例如：
+
+```text
+[astrbot_plugin_dynamic_card_plus] injected tool reminder group=123 source=schedule has_tool=true tools=set_dynamic_group_card
+```
+
+如果 `has_tool=false`，说明本轮请求里没有带上这个工具，需要检查 persona/工具启用设置。
 
 ## 完整名片模板
 

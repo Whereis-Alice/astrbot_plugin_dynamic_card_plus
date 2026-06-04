@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.7.0
+
+- 移除 `tool_reminder_mode.reminder_policy` 和 `suggest` 模式；`llm_request` 到提醒时间后一律注入强制工具调用提示。
+- 强化 `llm_request` 提示词：要求下一条 assistant 行为必须调用 `set_dynamic_group_card`，工具调用前禁止输出自然语言，禁止把系统提示当聊天话题，禁止未调用工具却声称已修改。
+- 工具说明与提醒提示统一为同一套工具调用协议，减少提示之间互相打架。
+- 提醒注入日志新增 `has_tool` 和工具列表，方便判断当前请求是否真的带上 `set_dynamic_group_card`。
+- 默认想法、日程、随心后缀生成提示词改为“为自己生成”，不再强调“机器人”。
+
 ## v0.6.0
 
 - 移除插件直改名片的后台任务触发方式，避免绕过 bot 自己调用 LLM 工具。

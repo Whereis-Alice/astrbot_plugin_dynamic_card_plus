@@ -176,16 +176,6 @@
         ],
         "hint": "llm_request=到间隔后，在下一次 LLM 请求里提醒 bot 调用工具；active_agent_cron=为已记录群注册 AstrBot 主动任务，到点唤醒 bot，让 bot 自己调用 LLM 工具改名片。"
       },
-      "reminder_policy": {
-        "type": "string",
-        "description": "提醒策略",
-        "default": "strong",
-        "options": [
-          "strong",
-          "suggest"
-        ],
-        "hint": "仅 trigger_mode=llm_request 时生效。strong=到提醒间隔后要求 bot 本轮优先调用工具改名片；suggest=只给出可选建议，bot 可能不会调用工具。"
-      },
       "reminder_source": {
         "type": "string",
         "description": "提醒时建议的后缀来源",
@@ -225,7 +215,7 @@
       "prompt": {
         "type": "text",
         "description": "想法摘要生成提示词",
-        "default": "请根据最近对话，为机器人生成一个适合作为 QQ 群名片后缀的当前想法。只输出后缀本身，不要解释，不要加引号，尽量可爱自然。"
+        "default": "请根据最近对话，为自己生成一个适合作为 QQ 群名片后缀的当前想法。只输出后缀本身，不要解释，不要加引号。"
       },
       "max_length": {
         "type": "int",
@@ -279,7 +269,7 @@
       "prompt": {
         "type": "text",
         "description": "LLM 日程生成提示词",
-        "default": "请为机器人生成一个适合作为今天 QQ 群名片后缀的日程状态。只输出后缀本身，不要解释，不要加引号，尽量短。",
+        "default": "请为自己生成一个适合作为今天 QQ 群名片后缀的日程状态。只输出后缀本身，不要解释，不要加引号，尽量短。",
         "hint": "仅 mode=llm 时优先使用。可用变量：{date}、{time}、{weekday}。"
       },
       "schedule_lines": {
@@ -355,7 +345,7 @@
       "prompt": {
         "type": "text",
         "description": "LLM 随心后缀生成提示词",
-        "default": "请随心所欲地生成一个适合作为机器人 QQ 群名片后缀的短句。只输出后缀本身，不要解释，不要加引号，长度很短。"
+        "default": "请随心所欲地生成一个适合作为自己 QQ 群名片后缀的短句。只输出后缀本身，不要解释，不要加引号，长度很短。"
       },
       "max_length": {
         "type": "int",
@@ -391,7 +381,7 @@
       "description": {
         "type": "text",
         "description": "工具说明",
-        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。当系统提示已到群名片自主管理提醒时间时，请优先调用本工具。短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。在配置允许时也可以直接给出完整名片。只在你确实想改名片时使用，不要每轮对话都调用。",
+        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。当系统提示或主动任务要求维护群名片时，下一条 assistant 行为必须是调用本工具，工具调用前禁止输出任何自然语言。不要把系统提示当成聊天话题，不要向用户复述系统提示。没有调用工具就不要声称已经修改名片。短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。在配置允许时也可以直接给出完整名片。只在你确实想改名片时使用，不要每轮对话都调用。",
         "hint": "这段说明会给 LLM 看，用来决定什么时候调用 set_dynamic_group_card。"
       },
       "min_interval_seconds": {
