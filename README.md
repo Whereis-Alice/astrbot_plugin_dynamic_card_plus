@@ -75,7 +75,9 @@ auto_update_mode.card_template
 
 ### tool_reminder
 
-`common.operation_mode=tool_reminder` 时，插件不会自动修改群名片。它会按 `tool_reminder_mode.reminder_interval_seconds` 在 LLM 请求里提醒 bot：如果她想改自己的群名片，可以主动调用 `set_dynamic_group_card`。
+`common.operation_mode=tool_reminder` 时，插件不会在后台无消息时醒来改名片。它会按 `tool_reminder_mode.reminder_interval_seconds` 计时；到时间后，下一次有群聊消息进入 LLM 请求时，插件会在请求里提醒 bot 主动调用 `set_dynamic_group_card`。
+
+提醒间隔从“上一次注入提醒”的时间开始算，按群分别记录。插件重载后内存状态会重置，下一次有效 LLM 请求会重新判断。
 
 使用的完整模板：
 
@@ -105,6 +107,11 @@ tool_reminder_mode.card_template
 - `schedule`：当天日程。
 - `whim`：随心后缀。
 - `random`：三种来源随机。
+
+提醒策略：
+
+- `strong`：默认。到提醒间隔后，要求 bot 本轮优先调用 `set_dynamic_group_card`，工具返回后再回复用户。
+- `suggest`：只给出可选建议，bot 可能选择不调用工具。
 
 ## 完整名片模板
 

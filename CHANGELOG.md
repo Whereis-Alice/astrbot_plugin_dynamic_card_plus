@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.3
+
+- 提醒工具模式新增 `tool_reminder_mode.reminder_policy`，支持 `strong` 和 `suggest`。
+- 默认提醒策略改为 `strong`：到提醒间隔后，会在本轮 LLM 请求里明确要求 bot 优先调用 `set_dynamic_group_card`，不再只是“如果你想改就改”的弱提示。
+- 提醒注入日志新增 group、policy、source，方便从 AstrBot 日志判断提醒是否真的触发。
+- LLM 工具说明补充：系统提示到达群名片自主管理提醒时间时，应优先调用工具。
+
 ## v0.4.2
 
 - 提醒工具模式默认完整名片模板改为 `{bot_name} {manual_suffix}`，更适合“bot 主动改一次后缀”的使用方式。

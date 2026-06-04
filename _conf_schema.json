@@ -165,6 +165,16 @@
         "description": "定时注入工具提醒",
         "default": true
       },
+      "reminder_policy": {
+        "type": "string",
+        "description": "提醒策略",
+        "default": "strong",
+        "options": [
+          "strong",
+          "suggest"
+        ],
+        "hint": "strong=到提醒间隔后要求 bot 本轮优先调用工具改名片；suggest=只给出可选建议，bot 可能不会调用工具。"
+      },
       "reminder_source": {
         "type": "string",
         "description": "提醒时建议的后缀来源",
@@ -364,7 +374,7 @@
       "description": {
         "type": "text",
         "description": "工具说明",
-        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。在配置允许时也可以直接给出完整名片。只在你确实想改名片时使用，不要每轮对话都调用。",
+        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。当系统提示已到群名片自主管理提醒时间时，请优先调用本工具。短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。在配置允许时也可以直接给出完整名片。只在你确实想改名片时使用，不要每轮对话都调用。",
         "hint": "这段说明会给 LLM 看，用来决定什么时候调用 set_dynamic_group_card。"
       },
       "min_interval_seconds": {

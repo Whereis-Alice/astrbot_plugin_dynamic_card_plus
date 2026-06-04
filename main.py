@@ -22,7 +22,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.4.2"
+PLUGIN_VERSION = "0.4.3"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -32,6 +32,7 @@ CARD_HINT_MARKER = "[DynamicCardPlus]"
 DEFAULT_TOOL_DESCRIPTION = (
     "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。"
     "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
+    "当系统提示已到群名片自主管理提醒时间时，请优先调用本工具。"
     "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
     "在配置允许时也可以直接给出完整名片。"
     "只在你确实想改名片时使用，不要每轮对话都调用。"
@@ -163,6 +164,7 @@ class PluginSettings:
     tool_reminder_card_template: str
     tool_reminder_inject_hint: bool
     tool_reminder_source: str
+    tool_reminder_policy: str
 
     thought_refresh_seconds: int
     thought_prefix: str
@@ -355,6 +357,10 @@ class DynamicCardPlusPlugin(Star):
         if reminder_source not in {"thought", "schedule", "whim", "random"}:
             reminder_source = "random"
 
+        reminder_policy = _clean_text(reminder_mode.get("reminder_policy"), "strong")
+        if reminder_policy not in {"strong", "suggest"}:
+            reminder_policy = "strong"
+
         schedule_mode = _clean_text(schedule.get("mode"), "rules")
         if schedule_mode not in {"rules", "llm"}:
             schedule_mode = "rules"
@@ -447,6 +453,7 @@ class DynamicCardPlusPlugin(Star):
                 True,
             ),
             tool_reminder_source=reminder_source,
+            tool_reminder_policy=reminder_policy,
             thought_refresh_seconds=_read_int(
                 thought.get("refresh_seconds"),
                 1800,
@@ -548,25 +555,43 @@ class DynamicCardPlusPlugin(Star):
             return
 
         current_card = state.last_card or "还没有记录"
-        suggestion, source_label = await self._build_tool_reminder_suggestion(
+        suggestion, source_label, source = await self._build_tool_reminder_suggestion(
             event=event,
             state=state,
             settings=settings,
             now=now,
         )
-        suggestion_text = f"建议：{suggestion}（来源：{source_label}）。" if suggestion else ""
-        hint = (
-            f"{CARD_HINT_MARKER} 已到配置的群名片自主管理提醒时间。"
-            f"当前记录的群名片是：{current_card}。"
-            f"{suggestion_text}"
-            f"如果你想更新自己在当前 QQ 群里的群名片，请主动调用 {CARD_TOOL_NAME}；"
-            "如果你觉得现在不用改，就正常回复用户。工具调用成功后，工具返回会告诉你已经改成什么。"
-        )
+        if settings.tool_reminder_policy == "suggest":
+            suggestion_text = f"建议：{suggestion}（来源：{source_label}）。" if suggestion else ""
+            hint = (
+                f"{CARD_HINT_MARKER} 已到配置的群名片自主管理提醒时间。"
+                f"当前记录的群名片是：{current_card}。"
+                f"{suggestion_text}"
+                f"如果你想更新自己在当前 QQ 群里的群名片，请主动调用 {CARD_TOOL_NAME}；"
+                "如果你觉得现在不用改，就正常回复用户。工具调用成功后，工具返回会告诉你已经改成什么。"
+            )
+        else:
+            hint = (
+                f"{CARD_HINT_MARKER} 已到配置的群名片自主管理提醒时间。"
+                f"当前记录的群名片是：{current_card}。"
+                f"本轮回复用户前，必须优先调用 {CARD_TOOL_NAME}，参数使用 mode=suffix、source={source}、"
+                "reason=群名片自主管理提醒。"
+                f"本次来源：{source_label}。{suggestion}"
+                "工具调用成功后，先根据工具返回确认新名片，再自然回复用户。"
+                "不要只口头表示要修改；如果没有调用工具，就不要声称已经修改。不要把旧后缀拼进新后缀里。"
+            )
         system_prompt = str(getattr(req, "system_prompt", "") or "")
         if CARD_HINT_MARKER in system_prompt:
             return
         req.system_prompt = f"{system_prompt}\n\n{hint}".strip() if system_prompt else hint
         state.last_tool_reminder_at = now
+        logger.info(
+            "[%s] injected tool reminder group=%s policy=%s source=%s",
+            PLUGIN_ID,
+            group_id,
+            settings.tool_reminder_policy,
+            source,
+        )
 
     @filter.on_decorating_result()
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
@@ -833,7 +858,7 @@ class DynamicCardPlusPlugin(Star):
         state: GroupCardState,
         settings: PluginSettings,
         now: float,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         del event, state, now
         source = settings.tool_reminder_source
         if source == "random":
@@ -841,40 +866,46 @@ class DynamicCardPlusPlugin(Star):
 
         if source == "thought":
             return (
-                "如果你想把当前会话想法写进名片，请调用工具并设置 mode=suffix、source=thought。",
+                "把当前会话想法写进名片。",
                 "会话想法摘要",
+                "thought",
             )
 
         if source == "schedule":
             if settings.schedule_mode == "llm":
                 return (
-                    "如果你想把今天的日程状态写进名片，请调用工具并设置 mode=suffix、source=schedule，工具会让 LLM 生成日程后缀。",
+                    "把今天的日程状态写进名片，工具会让 LLM 生成日程后缀。",
                     "当天日程",
+                    "schedule",
                 )
             schedule = self._build_schedule_rule_suffix(settings)
             if schedule:
                 return (
-                    f"当天日程后缀可以是“{schedule}”；也可以调用工具并设置 mode=suffix、source=schedule。",
+                    f"当天日程后缀可以参考“{schedule}”。",
                     "当天日程",
+                    "schedule",
                 )
             return (
-                "如果你想把当天日程写进名片，请调用工具并设置 mode=suffix、source=schedule。",
+                "把当天日程写进名片。",
                 "当天日程",
+                "schedule",
             )
 
         if source == "whim":
             if settings.whim_mode == "pool" and settings.whim_pool:
                 whim = _truncate(random.choice(settings.whim_pool), settings.whim_max_length)
                 return (
-                    f"随心后缀可以是“{whim}”；也可以调用工具并设置 mode=suffix、source=whim。",
+                    f"随心后缀可以参考“{whim}”。",
                     "随心后缀",
+                    "whim",
                 )
             return (
-                "如果你想随心所欲改名片，请调用工具并设置 mode=suffix、source=whim。",
+                "随心所欲生成一个短后缀写进名片。",
                 "随心后缀",
+                "whim",
             )
 
-        return "", "动态后缀"
+        return "生成一个动态短后缀写进名片。", "动态后缀", "whim"
 
     async def _build_suffix_from_source(
         self,
