@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.1
+
+- 修复模板同时使用 `{manual_suffix}` 和 `{suffixes}` 时，工具后缀会重复显示的问题。
+- 修复模板同时显式使用 `{manual_suffix}` 与 `{thought_suffix}` / `{schedule_suffix}` / `{whim_suffix}`，且两者原文相同时的重复显示问题。
+
 ## v0.4.0
 
 - 当天日程新增 `daily_schedule.mode`，支持 `rules` 规则匹配和 `llm` 让 bot/LLM 生成日程后缀。

@@ -22,7 +22,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.4.1"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -938,7 +938,28 @@ class DynamicCardPlusPlugin(Star):
         memory_text = _render_template(settings.memory_template, metrics) if settings.include_memory else ""
         time_text = _render_template(settings.time_template, metrics) if settings.include_time else ""
         metric_parts = [part for part in (_clean_text(cpu_text), _clean_text(memory_text), _clean_text(time_text)) if part]
-        suffix_parts = self._build_suffix_parts(state, settings, now)
+        card_template = self._active_card_template(settings)
+        manual_suffix = state.manual_suffix if state.has_active_manual_suffix(now) else ""
+        thought_suffix = state.thought_suffix
+        schedule_suffix = state.schedule_suffix
+        whim_suffix = state.whim_suffix
+
+        if manual_suffix and "{manual_suffix}" in card_template:
+            if "{thought_suffix}" in card_template and thought_suffix == manual_suffix:
+                thought_suffix = ""
+            if "{schedule_suffix}" in card_template and schedule_suffix == manual_suffix:
+                schedule_suffix = ""
+            if "{whim_suffix}" in card_template and whim_suffix == manual_suffix:
+                whim_suffix = ""
+
+        suffix_parts = self._build_suffix_parts(
+            settings=settings,
+            template=card_template,
+            manual_suffix=manual_suffix,
+            thought_suffix=thought_suffix,
+            schedule_suffix=schedule_suffix,
+            whim_suffix=whim_suffix,
+        )
 
         values = {
             **metrics,
@@ -948,13 +969,13 @@ class DynamicCardPlusPlugin(Star):
             "time_text": _clean_text(time_text),
             "metrics": " ".join(metric_parts),
             "suffixes": " ".join(suffix_parts),
-            "manual_suffix": state.manual_suffix if state.has_active_manual_suffix(now) else "",
-            "thought_suffix": state.thought_suffix,
-            "schedule_suffix": state.schedule_suffix,
-            "whim_suffix": state.whim_suffix,
+            "manual_suffix": manual_suffix,
+            "thought_suffix": thought_suffix,
+            "schedule_suffix": schedule_suffix,
+            "whim_suffix": whim_suffix,
             "static_suffix": settings.static_suffix,
         }
-        card = _render_template(self._active_card_template(settings), values)
+        card = _render_template(card_template, values)
         return _truncate(_compact_spaces(card), settings.max_card_length)
 
     def _active_card_template(self, settings: PluginSettings) -> str:
@@ -974,34 +995,40 @@ class DynamicCardPlusPlugin(Star):
 
     def _build_suffix_parts(
         self,
-        state: GroupCardState,
+        *,
         settings: PluginSettings,
-        now: float,
+        template: str,
+        manual_suffix: str,
+        thought_suffix: str,
+        schedule_suffix: str,
+        whim_suffix: str,
     ) -> list[str]:
         parts: list[str] = []
-        manual_suffix = state.manual_suffix if state.has_active_manual_suffix(now) else ""
-        if settings.static_suffix:
+        if settings.static_suffix and "{static_suffix}" not in template:
             parts.append(settings.static_suffix)
-        if manual_suffix:
+        if manual_suffix and "{manual_suffix}" not in template:
             parts.append(manual_suffix)
         if (
             (settings.operation_mode == "tool_reminder" or settings.auto_include_schedule)
-            and state.schedule_suffix
-            and state.schedule_suffix != manual_suffix
+            and schedule_suffix
+            and schedule_suffix != manual_suffix
+            and "{schedule_suffix}" not in template
         ):
-            parts.append(self._with_prefix(settings.schedule_prefix, state.schedule_suffix))
+            parts.append(self._with_prefix(settings.schedule_prefix, schedule_suffix))
         if (
             (settings.operation_mode == "tool_reminder" or settings.auto_include_whim)
-            and state.whim_suffix
-            and state.whim_suffix != manual_suffix
+            and whim_suffix
+            and whim_suffix != manual_suffix
+            and "{whim_suffix}" not in template
         ):
-            parts.append(self._with_prefix(settings.whim_prefix, state.whim_suffix))
+            parts.append(self._with_prefix(settings.whim_prefix, whim_suffix))
         if (
             (settings.operation_mode == "tool_reminder" or settings.auto_include_thought)
-            and state.thought_suffix
-            and state.thought_suffix != manual_suffix
+            and thought_suffix
+            and thought_suffix != manual_suffix
+            and "{thought_suffix}" not in template
         ):
-            parts.append(self._with_prefix(settings.thought_prefix, state.thought_suffix))
+            parts.append(self._with_prefix(settings.thought_prefix, thought_suffix))
         return parts
 
     def _with_prefix(self, prefix: str, text: str) -> str:
