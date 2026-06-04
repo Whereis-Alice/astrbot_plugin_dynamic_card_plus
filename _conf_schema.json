@@ -227,6 +227,16 @@
     "type": "object",
     "description": "动态来源：当天日程",
     "items": {
+      "mode": {
+        "type": "string",
+        "description": "当天日程来源",
+        "default": "rules",
+        "options": [
+          "rules",
+          "llm"
+        ],
+        "hint": "rules=按下面的一周/日期规则匹配；llm=让 bot/LLM 生成当天日程后缀，失败时回落到规则和兜底文本。"
+      },
       "refresh_seconds": {
         "type": "int",
         "description": "日程后缀刷新间隔秒数",
@@ -239,6 +249,12 @@
         "description": "日程后缀前缀",
         "default": "日程:"
       },
+      "prompt": {
+        "type": "text",
+        "description": "LLM 日程生成提示词",
+        "default": "请为机器人生成一个适合作为今天 QQ 群名片后缀的日程状态。只输出后缀本身，不要解释，不要加引号，尽量短。",
+        "hint": "仅 mode=llm 时优先使用。可用变量：{date}、{time}、{weekday}。"
+      },
       "schedule_lines": {
         "type": "list",
         "description": "日程规则",
@@ -247,15 +263,19 @@
         },
         "default": [
           "周一=整理周计划",
+          "周二=推进待办",
+          "周三=补充能量",
+          "周四=检查进度",
           "周五=准备周末模式",
-          "daily=自由活动"
+          "周六=自由活动",
+          "周日=慢慢充电"
         ],
         "hint": "支持 YYYY-MM-DD=内容、MM-DD=内容、星期一=内容、周一=内容、daily=内容。内容可用 {date}、{time}、{weekday}。"
       },
       "empty_text": {
         "type": "string",
         "description": "没有命中日程时的兜底文本",
-        "default": ""
+        "default": "自由活动"
       },
       "max_length": {
         "type": "int",

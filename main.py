@@ -22,7 +22,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.4.0"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -34,6 +34,19 @@ DEFAULT_TOOL_DESCRIPTION = (
     "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
     "在配置允许时也可以直接给出完整名片。"
     "只在你确实想改名片时使用，不要每轮对话都调用。"
+)
+DEFAULT_WEEK_SCHEDULE_LINES = [
+    "周一=整理周计划",
+    "周二=推进待办",
+    "周三=补充能量",
+    "周四=检查进度",
+    "周五=准备周末模式",
+    "周六=自由活动",
+    "周日=慢慢充电",
+]
+DEFAULT_SCHEDULE_PROMPT = (
+    "请为机器人生成一个适合作为今天 QQ 群名片后缀的日程状态。"
+    "只输出后缀本身，不要解释，不要加引号，尽量短。"
 )
 
 
@@ -157,8 +170,10 @@ class PluginSettings:
     thought_context_messages: int
     thought_context_message_max_chars: int
 
+    schedule_mode: str
     schedule_refresh_seconds: int
     schedule_prefix: str
+    schedule_prompt: str
     schedule_lines: list[str]
     schedule_empty_text: str
     schedule_max_length: int
@@ -338,6 +353,10 @@ class DynamicCardPlusPlugin(Star):
         if reminder_source not in {"thought", "schedule", "whim", "random"}:
             reminder_source = "random"
 
+        schedule_mode = _clean_text(schedule.get("mode"), "rules")
+        if schedule_mode not in {"rules", "llm"}:
+            schedule_mode = "rules"
+
         return PluginSettings(
             enabled=_read_bool(common.get("enabled", legacy_general.get("enabled")), True),
             debug_log=_read_bool(common.get("debug_log", legacy_general.get("debug_log")), False),
@@ -447,6 +466,7 @@ class DynamicCardPlusPlugin(Star):
                 minimum=20,
                 maximum=1000,
             ),
+            schedule_mode=schedule_mode,
             schedule_refresh_seconds=_read_int(
                 schedule.get("refresh_seconds"),
                 3600,
@@ -454,8 +474,9 @@ class DynamicCardPlusPlugin(Star):
                 maximum=604800,
             ),
             schedule_prefix=_clean_text(schedule.get("prefix"), "日程:"),
-            schedule_lines=_read_list(schedule.get("schedule_lines"), []),
-            schedule_empty_text=_clean_text(schedule.get("empty_text")),
+            schedule_prompt=_clean_text(schedule.get("prompt"), DEFAULT_SCHEDULE_PROMPT),
+            schedule_lines=_read_list(schedule.get("schedule_lines"), DEFAULT_WEEK_SCHEDULE_LINES),
+            schedule_empty_text=_clean_text(schedule.get("empty_text"), "自由活动"),
             schedule_max_length=_read_int(schedule.get("max_length"), 18, minimum=2, maximum=80),
             whim_refresh_seconds=_read_int(
                 whim.get("refresh_seconds"),
@@ -810,7 +831,12 @@ class DynamicCardPlusPlugin(Star):
             )
 
         if source == "schedule":
-            schedule = self._build_schedule_suffix(settings)
+            if settings.schedule_mode == "llm":
+                return (
+                    "如果你想把今天的日程状态写进名片，请调用工具并设置 mode=suffix、source=schedule，工具会让 LLM 生成日程后缀。",
+                    "当天日程",
+                )
+            schedule = self._build_schedule_rule_suffix(settings)
             if schedule:
                 return (
                     f"当天日程后缀可以是“{schedule}”；也可以调用工具并设置 mode=suffix、source=schedule。",
@@ -867,7 +893,7 @@ class DynamicCardPlusPlugin(Star):
             return suffix, "会话想法摘要"
 
         if source == "schedule":
-            suffix = self._build_schedule_suffix(settings)
+            suffix = await self._build_schedule_suffix(event, settings)
             state.schedule_suffix = suffix
             state.schedule_generated_at = now
             return suffix, "当天日程"
@@ -890,7 +916,7 @@ class DynamicCardPlusPlugin(Star):
         state.clear_expired_manual(now)
 
         if settings.auto_include_schedule and now - state.schedule_generated_at >= settings.schedule_refresh_seconds:
-            state.schedule_suffix = self._build_schedule_suffix(settings)
+            state.schedule_suffix = await self._build_schedule_suffix(event, settings)
             state.schedule_generated_at = now
 
         if settings.auto_include_whim and now - state.whim_generated_at >= settings.whim_refresh_seconds:
@@ -983,17 +1009,37 @@ class DynamicCardPlusPlugin(Star):
             return ""
         return f"{prefix}{text}" if prefix else text
 
-    def _build_schedule_suffix(self, settings: PluginSettings) -> str:
+    async def _build_schedule_suffix(
+        self,
+        event: AstrMessageEvent,
+        settings: PluginSettings,
+    ) -> str:
+        if settings.schedule_mode == "llm":
+            values = self._schedule_template_values()
+            prompt = (
+                f"{_render_template(settings.schedule_prompt, values)}\n"
+                f"今天：{values['date']}，{values['weekday']}，当前时间：{values['time']}。\n"
+                f"要求：不超过 {settings.schedule_max_length} 个字。"
+            )
+            generated = await self._llm_short_text(event, prompt, settings, settings.schedule_max_length)
+            if generated:
+                return generated
+        return self._build_schedule_rule_suffix(settings)
+
+    def _build_schedule_rule_suffix(self, settings: PluginSettings) -> str:
+        values = self._schedule_template_values()
+        selected = self._select_schedule_line(settings.schedule_lines, datetime.now())
+        if not selected:
+            selected = settings.schedule_empty_text
+        return _truncate(_render_template(selected, values), settings.schedule_max_length)
+
+    def _schedule_template_values(self) -> dict[str, str]:
         now = datetime.now()
-        values = {
+        return {
             "date": now.strftime("%Y-%m-%d"),
             "time": now.strftime("%H:%M"),
             "weekday": self._weekday_name(now),
         }
-        selected = self._select_schedule_line(settings.schedule_lines, now)
-        if not selected:
-            selected = settings.schedule_empty_text
-        return _truncate(_render_template(selected, values), settings.schedule_max_length)
 
     def _select_schedule_line(self, lines: list[str], now: datetime) -> str:
         if not lines:

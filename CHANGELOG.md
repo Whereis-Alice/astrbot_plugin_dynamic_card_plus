@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.0
+
+- 当天日程新增 `daily_schedule.mode`，支持 `rules` 规则匹配和 `llm` 让 bot/LLM 生成日程后缀。
+- 新增 `daily_schedule.prompt`，用于自定义 LLM 生成当天日程后缀的提示词。
+- `daily_schedule.schedule_lines` 默认改为一周七天规则。
+- `daily_schedule.empty_text` 默认改为 `自由活动`，作为规则未命中或 LLM 失败后的兜底文本。
+
 ## v0.3.0
 
 - 修复 v4.25.2 中 LLM 工具返回 `ToolExecResult(...)` 会触发 `'types.UnionType' object is not callable` 的问题；工具现在返回普通文本，避免“名片实际已修改但模型收到工具错误”的情况。

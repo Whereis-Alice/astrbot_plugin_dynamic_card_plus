@@ -21,6 +21,7 @@
 - 自动模式：插件按配置频率直接更新群名片。
 - 提醒工具模式：插件不自动改名片，只定时提醒 bot 可以主动调用 LLM 工具改名片。
 - 支持 CPU、内存、时间、固定后缀、会话想法摘要、当天日程、随心后缀。
+- 当天日程支持规则匹配或让 bot/LLM 生成。
 - 支持自然语言让 bot 调用 `set_dynamic_group_card` 改名片。
 - 支持群号黑名单和 `unified_msg_origin` 黑名单。
 
@@ -178,7 +179,24 @@ set_dynamic_group_card
 
 ### daily_schedule
 
-`schedule_lines` 支持：
+`daily_schedule.mode` 支持：
+
+- `rules`：按 `schedule_lines` 规则匹配当天日程。
+- `llm`：让 bot/LLM 生成当天日程后缀，失败时回落到规则和兜底文本。
+
+默认规则包含一周七天：
+
+```text
+周一=整理周计划
+周二=推进待办
+周三=补充能量
+周四=检查进度
+周五=准备周末模式
+周六=自由活动
+周日=慢慢充电
+```
+
+你也可以加日期规则：
 
 ```text
 2026-07-15=今晚整理插件
@@ -189,6 +207,8 @@ daily=自由活动
 ```
 
 日程内容里可用 `{date}`、`{time}`、`{weekday}`。
+
+如果没有命中任何规则，会使用 `daily_schedule.empty_text`，默认是 `自由活动`。
 
 ### whim_suffix
 
