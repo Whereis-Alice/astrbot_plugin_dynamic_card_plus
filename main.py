@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import random
 import re
 import time
+from contextlib import suppress
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,7 +25,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.2"
+PLUGIN_VERSION = "0.8.3"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -306,12 +308,20 @@ class DynamicCardPlusPlugin(Star):
         self.config = config or {}
         self._states: dict[str, GroupCardState] = defaultdict(GroupCardState)
         self._active_cron_jobs: dict[str, str] = {}
+        self._active_cron_register_tasks: dict[str, asyncio.Task[None]] = {}
+        self._active_cron_db_lock = asyncio.Lock()
         self._register_llm_tool()
 
     async def initialize(self) -> None:
         logger.info("[%s] initialized; upstream=%s", PLUGIN_ID, UPSTREAM_REPO)
 
     async def terminate(self) -> None:
+        for task in list(self._active_cron_register_tasks.values()):
+            task.cancel()
+        for task in list(self._active_cron_register_tasks.values()):
+            with suppress(asyncio.CancelledError):
+                await task
+        self._active_cron_register_tasks.clear()
         await self._delete_registered_active_cron_jobs()
 
     def _register_llm_tool(self) -> None:
@@ -332,6 +342,9 @@ class DynamicCardPlusPlugin(Star):
     async def _ensure_active_cron_job(self, group_key: str, state: GroupCardState, settings: PluginSettings) -> None:
         if group_key in self._active_cron_jobs:
             return
+        existing_task = self._active_cron_register_tasks.get(group_key)
+        if existing_task is not None and not existing_task.done():
+            return
         if not state.unified_msg_origin:
             return
         cron_mgr = getattr(self.context, "cron_manager", None)
@@ -339,26 +352,73 @@ class DynamicCardPlusPlugin(Star):
             logger.warning("[%s] cron_manager unavailable; cannot register active cron job", PLUGIN_ID)
             return
 
+        task = asyncio.create_task(
+            self._register_active_cron_job_with_retry(
+                group_key=group_key,
+                unified_msg_origin=state.unified_msg_origin,
+                settings=settings,
+            )
+        )
+        self._active_cron_register_tasks[group_key] = task
+        task.add_done_callback(lambda _: self._active_cron_register_tasks.pop(group_key, None))
+
+    async def _register_active_cron_job_with_retry(
+        self,
+        *,
+        group_key: str,
+        unified_msg_origin: str,
+        settings: PluginSettings,
+    ) -> None:
+        for attempt in range(4):
+            try:
+                async with self._active_cron_db_lock:
+                    await self._register_active_cron_job_once(group_key, unified_msg_origin, settings)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if self._is_database_locked_error(exc) and attempt < 3:
+                    delay = 1.5 * (attempt + 1)
+                    logger.warning(
+                        "[%s] active cron register delayed by locked database group=%s attempt=%s delay=%.1fs",
+                        PLUGIN_ID,
+                        group_key,
+                        attempt + 1,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.warning("[%s] active cron register failed group=%s error=%r", PLUGIN_ID, group_key, exc)
+                return
+
+    async def _register_active_cron_job_once(
+        self,
+        group_key: str,
+        unified_msg_origin: str,
+        settings: PluginSettings,
+    ) -> None:
+        if group_key in self._active_cron_jobs:
+            return
+        cron_mgr = getattr(self.context, "cron_manager", None)
+        if cron_mgr is None:
+            return
+
         name = self._active_cron_job_name(group_key)
         await self._delete_active_cron_job_by_name(name)
         cron_expression = self._active_cron_expression(settings)
         payload = {
-            "session": state.unified_msg_origin,
+            "session": unified_msg_origin,
             "note": self._active_cron_note(settings),
         }
-        try:
-            job = await self._maybe_await(
-                cron_mgr.add_active_job(
-                    name=name,
-                    cron_expression=cron_expression,
-                    payload=payload,
-                    run_once=False,
-                    description="Dynamic Card Plus 主动唤醒 bot 改群名片",
-                )
+        job = await self._maybe_await(
+            cron_mgr.add_active_job(
+                name=name,
+                cron_expression=cron_expression,
+                payload=payload,
+                run_once=False,
+                description="Dynamic Card Plus 主动唤醒 bot 改群名片",
             )
-        except Exception as exc:
-            logger.warning("[%s] add active cron job failed group=%s error=%r", PLUGIN_ID, group_key, exc)
-            return
+        )
 
         job_id = self._cron_job_value(job, "id", "job_id") or name
         self._active_cron_jobs[group_key] = str(job_id)
@@ -369,6 +429,10 @@ class DynamicCardPlusPlugin(Star):
             cron_expression,
             job_id,
         )
+
+    def _is_database_locked_error(self, exc: Exception) -> bool:
+        text = repr(exc).lower()
+        return "database is locked" in text or "sqlite3.operationalerror" in text and "locked" in text
 
     async def _delete_registered_active_cron_jobs(self) -> None:
         cron_mgr = getattr(self.context, "cron_manager", None)
@@ -392,6 +456,8 @@ class DynamicCardPlusPlugin(Star):
             except TypeError:
                 jobs = await self._maybe_await(cron_mgr.list_jobs())
         except Exception as exc:
+            if self._is_database_locked_error(exc):
+                raise
             logger.warning("[%s] list active cron jobs failed: %r", PLUGIN_ID, exc)
             return
 
@@ -405,6 +471,8 @@ class DynamicCardPlusPlugin(Star):
                 await self._maybe_await(cron_mgr.delete_job(job_id))
                 logger.info("[%s] deleted stale active cron job name=%s id=%s", PLUGIN_ID, name, job_id)
             except Exception as exc:
+                if self._is_database_locked_error(exc):
+                    raise
                 logger.warning("[%s] delete stale active cron job failed id=%s error=%r", PLUGIN_ID, job_id, exc)
 
     def _cron_job_value(self, job: Any, *names: str) -> Any:

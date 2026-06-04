@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.3
+
+- 优化 `active_agent_cron` 的主动任务注册：从消息/LLM 请求链路中移出，改为后台异步串行注册，避免处理 agent 请求时直接抢 SQLite 锁。
+- 遇到 `database is locked` 时会延迟重试，减少 `sqlite3.OperationalError: database is locked` 对当前对话请求的影响。
+- 插件卸载时会取消尚未完成的 cron 注册任务，再清理已登记的主动任务。
+
 ## v0.8.2
 
 - 强化定时触发提示的重复触发语义：每次 `llm_request` 提醒都会带本次触发编号。
