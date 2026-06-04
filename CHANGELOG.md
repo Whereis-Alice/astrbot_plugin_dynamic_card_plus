@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.1
+
+- 收敛提醒注入日志：普通 info 日志只保留 group、source、has_tool、tool_count。
+- 工具列表样本仅在 `common.debug_log=true` 或 `has_tool=false` 时输出，减少 293 个工具这类日志噪音。
+
 ## v0.8.0
 
 - 将 LLM 工具说明与定时触发提示词彻底分离：工具说明只描述 `set_dynamic_group_card` 的能力，触发时由 `llm_request` / `active_agent_cron` 额外注入强制工具调用任务提示。

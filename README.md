@@ -124,10 +124,10 @@ tool_reminder_mode.card_template
 提醒注入成功时，AstrBot 日志会包含 `has_tool` 和当前请求的工具列表，例如：
 
 ```text
-[astrbot_plugin_dynamic_card_plus] injected tool reminder group=123 source=schedule has_tool=true tool_count=27 tools=set_dynamic_group_card,...
+[astrbot_plugin_dynamic_card_plus] injected tool reminder group=123 source=schedule has_tool=true tool_count=27
 ```
 
-如果 `has_tool=false`，说明本轮请求里没有带上这个工具，需要检查 persona/工具启用设置。日志只展示工具样本；如果目标工具存在，会优先显示 `set_dynamic_group_card`。
+如果 `has_tool=false`，说明本轮请求里没有带上这个工具，需要检查 persona/工具启用设置。普通日志不再打印完整工具样本；开启 `common.debug_log=true`，或 `has_tool=false` 时，才会输出工具样本。
 
 ## 完整名片模板
 

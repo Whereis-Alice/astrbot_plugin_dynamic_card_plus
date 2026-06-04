@@ -23,7 +23,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.0"
+PLUGIN_VERSION = "0.8.1"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -735,19 +735,21 @@ class DynamicCardPlusPlugin(Star):
         has_tool = CARD_TOOL_NAME in tool_names
         state.last_tool_reminder_at = now
         logger.info(
-            "[%s] injected tool reminder group=%s source=%s has_tool=%s tool_count=%s tools=%s",
+            "[%s] injected tool reminder group=%s source=%s has_tool=%s tool_count=%s",
             PLUGIN_ID,
             group_id,
             source,
             has_tool,
             len(tool_names),
-            self._format_tool_names_for_log(tool_names),
         )
+        if settings.debug_log and tool_names:
+            logger.info("[%s] request tools sample=%s", PLUGIN_ID, self._format_tool_names_for_log(tool_names))
         if not has_tool:
             logger.warning(
-                "[%s] reminder injected but %s is not present in request tools; check persona/tool settings",
+                "[%s] reminder injected but %s is not present in request tools; check persona/tool settings; tools=%s",
                 PLUGIN_ID,
                 CARD_TOOL_NAME,
+                self._format_tool_names_for_log(tool_names),
             )
 
     def _append_provider_hint(self, req: ProviderRequest, hint: str) -> bool:
