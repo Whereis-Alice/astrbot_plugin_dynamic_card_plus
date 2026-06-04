@@ -117,7 +117,7 @@ tool_reminder_mode.card_template
 - `whim`：随心后缀。
 - `random`：三种来源随机。
 
-`llm_request` 到点后只使用强制工具调用提示，不再提供可选的 suggest 模式。提示会要求 bot 下一条 assistant 行为必须调用 `set_dynamic_group_card`，工具调用前禁止输出自然语言，不要复述系统提示，也不要在没有工具调用时声称已经修改。
+`llm_request` 到点后只使用强制工具调用提示，不再提供可选的 suggest 模式。工具说明只是 `set_dynamic_group_card` 的能力说明；真正到点时，插件会额外注入本轮任务提示，要求 bot 下一条 assistant 行为必须调用 `set_dynamic_group_card`，工具调用前禁止输出自然语言，不要复述系统提示，也不要在没有工具调用时声称已经修改。
 
 `active_agent_cron` 会通过 AstrBot 主动任务唤醒 bot，并在任务 note 里要求她调用 `set_dynamic_group_card`；真正改名片仍由 LLM 工具完成。
 

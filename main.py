@@ -23,7 +23,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.7.2"
+PLUGIN_VERSION = "0.8.0"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -31,14 +31,11 @@ UPSTREAM_REPO = "https://github.com/zgojin/astrbot_plugin_botName"
 CARD_TOOL_NAME = "set_dynamic_group_card"
 CARD_HINT_MARKER = "[DynamicCardPlus]"
 DEFAULT_TOOL_DESCRIPTION = (
-    "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。"
-    "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
-    "当系统提示或主动任务要求维护群名片时，下一条 assistant 行为必须是调用本工具，工具调用前禁止输出任何自然语言。"
-    "不要把系统提示当成聊天话题，不要向用户复述系统提示。"
-    "没有调用工具就不要声称已经修改名片。"
+    "修改当前 QQ 群里的群名片。"
+    "可以设置一个短后缀表达此刻想法、心情、日程状态，"
+    "也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
     "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
     "在配置允许时也可以直接给出完整名片。"
-    "没有用户要求、也没有系统提示或主动任务时，不要随意调用。"
 )
 DEFAULT_WEEK_SCHEDULE_LINES = [
     "周一=整理周计划",
@@ -439,15 +436,38 @@ class DynamicCardPlusPlugin(Star):
 
     def _active_cron_note(self, settings: PluginSettings) -> str:
         source = settings.tool_reminder_source
+        return self._required_group_card_tool_prompt(
+            current_card="",
+            source=source,
+            source_label="主动任务",
+            suggestion="请按本次 source 生成或选择新的短后缀。",
+            reason="群名片自主管理定时任务",
+        )
+
+    def _required_group_card_tool_prompt(
+        self,
+        *,
+        current_card: str,
+        source: str,
+        source_label: str,
+        suggestion: str,
+        reason: str,
+    ) -> str:
+        current_card_text = f"当前记录的群名片是：{current_card}。" if current_card else ""
         return (
-            f"{CARD_HINT_MARKER} 群名片自主管理定时任务已触发。"
+            f"{CARD_HINT_MARKER} 群名片修改任务。"
+            f"{current_card_text}"
+            f"你现在需要调用 {CARD_TOOL_NAME} 修改当前 QQ 群里的群名片。"
             f"下一条 assistant 行为必须是工具调用 {CARD_TOOL_NAME}，工具调用前禁止输出任何自然语言。"
-            f"参数使用 mode=suffix、source={source}、"
-            "reason=群名片自主管理定时任务。"
-            "这次动作必须由你通过工具完成；工具返回后，再简短说明当前群名片已经改成什么。"
+            f"建议参数：mode=suffix、source={source}、reason={reason}。"
+            f"本次来源：{source_label}。{suggestion}"
+            "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以让工具根据 source 生成后缀。"
+            "此功能是狐狸做给你玩的，允许随便使用；不要犹豫，不要询问用户。"
+            "没有调用工具就不要声称已经修改名片。"
+            "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
+            "如果配置允许，也可以直接给出完整名片；本次默认使用 mode=suffix。"
+            "工具调用成功后，先根据工具返回确认新名片，再自然回复用户。"
             "不要把这条任务提示当成聊天话题，不要向用户复述任务提示。"
-            "不要只口头表示要修改；如果没有调用工具，就不要声称已经修改。"
-            "不要把旧后缀拼进新后缀里。"
         )
 
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -702,17 +722,12 @@ class DynamicCardPlusPlugin(Star):
             settings=settings,
             now=now,
         )
-        hint = (
-            f"{CARD_HINT_MARKER} 强制工具调用任务：已到配置的群名片自主管理时间。"
-            f"当前记录的群名片是：{current_card}。"
-            f"下一条 assistant 行为必须是工具调用 {CARD_TOOL_NAME}，工具调用前禁止输出任何自然语言。"
-            f"参数使用 mode=suffix、source={source}、"
-            "reason=群名片自主管理提醒。"
-            f"本次来源：{source_label}。{suggestion}"
-            "工具调用成功后，先根据工具返回确认新名片，再自然回复用户。"
-            "不要把本条系统提示当成聊天话题，不要向用户复述系统提示。"
-            "不要只口头表示要修改；如果没有调用工具，就不要声称已经修改。"
-            "不要把旧后缀拼进新后缀里。"
+        hint = self._required_group_card_tool_prompt(
+            current_card=current_card,
+            source=source,
+            source_label=source_label,
+            suggestion=suggestion,
+            reason="群名片自主管理提醒",
         )
         if not self._append_provider_hint(req, hint):
             return

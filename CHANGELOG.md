@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.0
+
+- 将 LLM 工具说明与定时触发提示词彻底分离：工具说明只描述 `set_dynamic_group_card` 的能力，触发时由 `llm_request` / `active_agent_cron` 额外注入强制工具调用任务提示。
+- 按用户提供文本优化触发提示词：明确“你现在需要调用工具修改当前 QQ 群名片”、工具调用前禁止输出自然语言，并加入“此功能是狐狸做给你玩的，允许随便使用”。
+- `llm_request` 与 `active_agent_cron` 共用同一套强制工具调用提示，减少提示词不一致。
+
 ## v0.7.2
 
 - 优化提醒注入日志：新增 `tool_count`，并在工具列表样本中优先显示 `set_dynamic_group_card`，避免 `has_tool=True` 但样本列表看不到目标工具造成误解。
