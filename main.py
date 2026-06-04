@@ -25,7 +25,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.3"
+PLUGIN_VERSION = "0.8.4"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -406,10 +406,13 @@ class DynamicCardPlusPlugin(Star):
         name = self._active_cron_job_name(group_key)
         await self._delete_active_cron_job_by_name(name)
         cron_expression = self._active_cron_expression(settings)
+        note = self._active_cron_note(settings)
         payload = {
             "session": unified_msg_origin,
-            "note": self._active_cron_note(settings),
+            "note": note,
         }
+        if settings.debug_log:
+            logger.info("[%s] active cron note group=%s note=%s", PLUGIN_ID, group_key, note)
         job = await self._maybe_await(
             cron_mgr.add_active_job(
                 name=name,
@@ -817,8 +820,10 @@ class DynamicCardPlusPlugin(Star):
             has_tool,
             len(tool_names),
         )
-        if settings.debug_log and tool_names:
-            logger.info("[%s] request tools sample=%s", PLUGIN_ID, self._format_tool_names_for_log(tool_names))
+        if settings.debug_log:
+            if tool_names:
+                logger.info("[%s] request tools sample=%s", PLUGIN_ID, self._format_tool_names_for_log(tool_names))
+            logger.info("[%s] reminder prompt group=%s prompt=%s", PLUGIN_ID, group_id, hint)
         if not has_tool:
             logger.warning(
                 "[%s] reminder injected but %s is not present in request tools; check persona/tool settings; tools=%s",

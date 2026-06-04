@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.4
+
+- `common.debug_log=true` 时，`llm_request` 提醒注入会额外打印本轮实际注入的提醒提示词，方便排查模型为什么没有调用工具。
+- `active_agent_cron` 注册主动任务时，debug 日志会打印实际写入 cron payload 的任务 note。
+
 ## v0.8.3
 
 - 优化 `active_agent_cron` 的主动任务注册：从消息/LLM 请求链路中移出，改为后台异步串行注册，避免处理 agent 请求时直接抢 SQLite 锁。
