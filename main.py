@@ -20,12 +20,13 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core.agent.message import TextPart
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.4"
+PLUGIN_VERSION = "0.8.5"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -823,7 +824,12 @@ class DynamicCardPlusPlugin(Star):
         if settings.debug_log:
             if tool_names:
                 logger.info("[%s] request tools sample=%s", PLUGIN_ID, self._format_tool_names_for_log(tool_names))
-            logger.info("[%s] reminder prompt group=%s prompt=%s", PLUGIN_ID, group_id, hint)
+            logger.info(
+                "[%s] reminder prompt group=%s channels=system_prompt,temp_user_content prompt=%s",
+                PLUGIN_ID,
+                group_id,
+                hint,
+            )
         if not has_tool:
             logger.warning(
                 "[%s] reminder injected but %s is not present in request tools; check persona/tool settings; tools=%s",
@@ -833,10 +839,27 @@ class DynamicCardPlusPlugin(Star):
             )
 
     def _append_provider_hint(self, req: ProviderRequest, hint: str) -> bool:
+        injected = False
         system_prompt = str(getattr(req, "system_prompt", "") or "")
-        if CARD_HINT_MARKER in system_prompt:
+        if CARD_HINT_MARKER not in system_prompt:
+            req.system_prompt = f"{system_prompt}\n\n{hint}".strip() if system_prompt else hint
+            injected = True
+        if self._append_temp_user_hint(req, hint):
+            injected = True
+        return injected
+
+    def _append_temp_user_hint(self, req: ProviderRequest, hint: str) -> bool:
+        parts = getattr(req, "extra_user_content_parts", None)
+        if parts is None:
             return False
-        req.system_prompt = f"{system_prompt}\n\n{hint}".strip() if system_prompt else hint
+        for part in parts:
+            if CARD_HINT_MARKER in _clean_text(getattr(part, "text", "")):
+                return False
+        part = TextPart(text=hint)
+        mark_as_temp = getattr(part, "mark_as_temp", None)
+        if callable(mark_as_temp):
+            mark_as_temp()
+        parts.append(part)
         return True
 
     def _request_tool_names(self, req: ProviderRequest) -> list[str]:

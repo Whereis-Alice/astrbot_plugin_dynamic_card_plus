@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.5
+
+- `llm_request` 提醒提示除写入 `system_prompt` 外，也会追加到临时 `extra_user_content_parts`，避免后续插件或 runner 覆盖 system prompt 后 bot 看不到提醒。
+- debug 日志中标注提醒提示注入通道：`system_prompt,temp_user_content`。
+
 ## v0.8.4
 
 - `common.debug_log=true` 时，`llm_request` 提醒注入会额外打印本轮实际注入的提醒提示词，方便排查模型为什么没有调用工具。
