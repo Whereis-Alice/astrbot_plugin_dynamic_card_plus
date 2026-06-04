@@ -127,7 +127,7 @@ tool_reminder_mode.card_template
 [astrbot_plugin_dynamic_card_plus] injected tool reminder group=123 source=schedule has_tool=true tool_count=27
 ```
 
-如果 `has_tool=false`，说明本轮请求里没有带上这个工具，需要检查 persona/工具启用设置。普通日志不再打印完整工具样本；开启 `common.debug_log=true` 时，会输出工具样本和本轮注入的提醒提示词；`has_tool=false` 时也会输出工具样本。提醒提示会同时写入 `system_prompt` 和临时 `extra_user_content_parts`，降低后续插件覆盖 system prompt 时丢失提醒的概率。
+如果 `has_tool=false`，说明本轮请求里没有带上这个工具，需要检查 persona/工具启用设置。普通日志不再打印完整工具样本；开启 `common.debug_log=true` 时，会输出工具样本和本轮注入的提醒提示词；`has_tool=false` 时也会输出工具样本。提醒提示只写入临时 `extra_user_content_parts`，不再写入 `system_prompt`，避免被其他系统提示混淆或引发提示词覆盖问题。
 
 ## 完整名片模板
 

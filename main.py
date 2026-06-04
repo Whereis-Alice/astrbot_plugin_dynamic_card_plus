@@ -26,7 +26,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.5"
+PLUGIN_VERSION = "0.8.6"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -825,7 +825,7 @@ class DynamicCardPlusPlugin(Star):
             if tool_names:
                 logger.info("[%s] request tools sample=%s", PLUGIN_ID, self._format_tool_names_for_log(tool_names))
             logger.info(
-                "[%s] reminder prompt group=%s channels=system_prompt,temp_user_content prompt=%s",
+                "[%s] reminder prompt group=%s channels=temp_user_content prompt=%s",
                 PLUGIN_ID,
                 group_id,
                 hint,
@@ -839,14 +839,7 @@ class DynamicCardPlusPlugin(Star):
             )
 
     def _append_provider_hint(self, req: ProviderRequest, hint: str) -> bool:
-        injected = False
-        system_prompt = str(getattr(req, "system_prompt", "") or "")
-        if CARD_HINT_MARKER not in system_prompt:
-            req.system_prompt = f"{system_prompt}\n\n{hint}".strip() if system_prompt else hint
-            injected = True
-        if self._append_temp_user_hint(req, hint):
-            injected = True
-        return injected
+        return self._append_temp_user_hint(req, hint)
 
     def _append_temp_user_hint(self, req: ProviderRequest, hint: str) -> bool:
         parts = getattr(req, "extra_user_content_parts", None)

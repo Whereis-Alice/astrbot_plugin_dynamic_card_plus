@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.8.6
+
+- 提醒提示改为只注入临时 `extra_user_content_parts`，不再写入 `system_prompt`。
+- debug 日志中的提醒提示通道改为 `channels=temp_user_content`。
+
 ## v0.8.5
 
 - `llm_request` 提醒提示除写入 `system_prompt` 外，也会追加到临时 `extra_user_content_parts`，避免后续插件或 runner 覆盖 system prompt 后 bot 看不到提醒。
