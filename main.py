@@ -23,7 +23,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.7.0"
+PLUGIN_VERSION = "0.7.1"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -38,7 +38,7 @@ DEFAULT_TOOL_DESCRIPTION = (
     "没有调用工具就不要声称已经修改名片。"
     "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
     "在配置允许时也可以直接给出完整名片。"
-    "只在你确实想改名片时使用，不要每轮对话都调用。"
+    "没有用户要求、也没有系统提示或主动任务时，不要随意调用。"
 )
 DEFAULT_WEEK_SCHEDULE_LINES = [
     "周一=整理周计划",
