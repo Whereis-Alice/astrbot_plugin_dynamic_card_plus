@@ -19,7 +19,7 @@
 ## 功能
 
 - 自动动态群名片：CPU、内存、当前时间。
-- 可配置模板：完整名片、系统指标、分隔符、固定后缀都能在配置面板里改。
+- 可配置模板：完整名片、系统指标文本、固定后缀都能在配置面板里改；最终分隔符统一由完整名片模板控制。
 - 当前想法后缀：按频率汇总当前会话最近消息，让模型生成一个短后缀。
 - 当天日程后缀：按日期、星期或 daily 规则选择当天日程。
 - 随心后缀：可从候选池随机，也可让模型随心生成。
@@ -45,7 +45,10 @@ pip install -r requirements.txt
 ### general
 
 - `enabled`：总开关。
-- `update_interval_seconds`：自动更新名片的最小间隔。
+- `operation_mode`：群名片更新模式，二选一。
+- `auto_update`：插件按 `update_interval_seconds` 自动修改群名片。
+- `tool_reminder`：插件不自动改名片，只按 `llm_tool.reminder_interval_seconds` 提醒 bot 主动调用 LLM 工具修改。
+- `update_interval_seconds`：自动更新名片的最小间隔，仅 `auto_update` 生效。
 - `max_card_length`：最终名片最大长度。
 - `blacklist_group_ids`：群号黑名单。
 - `blacklist_unified_origins`：完整会话 ID 黑名单。
@@ -55,25 +58,30 @@ pip install -r requirements.txt
 `card_template` 控制最终群名片。默认模板：
 
 ```text
-{bot_name} {metrics} {suffixes}
+{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}
 ```
+
+这里不再单独提供“系统指标分隔符”“动态后缀分隔符”等配置项，避免和完整模板互相抢职责。你要什么分隔符，就直接写在 `card_template` 或单项模板里。
 
 #### `card_template` 可用变量
 
 | 变量 | 含义 | 示例 | 备注 |
 | --- | --- | --- | --- |
 | `{bot_name}` | `base_card.bot_name` 配置的机器人基础名字 | `AstrBot` | 永远来自配置。 |
-| `{metrics}` | 已启用系统指标拼接后的完整文本 | `CPU 12.3% / MEM 45.6% / 08:30` | 由 `include_cpu`、`include_memory`、`include_time` 和 `metric_separator` 控制。 |
-| `{suffixes}` | 已启用后缀拼接后的完整文本 | `日程:整理插件 / 正在观察世界 / 想法:想喝茶` | 由固定后缀、LLM 手动后缀、日程、随心后缀、想法摘要组成。 |
+| `{cpu_text}` | CPU 文本模板渲染结果 | `CPU 12.3%` | 由 `include_cpu` 和 `cpu_template` 控制。 |
+| `{memory_text}` | 内存文本模板渲染结果 | `MEM 45.6%` | 由 `include_memory` 和 `memory_template` 控制。 |
+| `{time_text}` | 时间文本模板渲染结果 | `08:30` | 由 `include_time` 和 `time_template` 控制。 |
+| `{metrics}` | 兼容便捷变量，三个系统文本用空格拼接 | `CPU 12.3% MEM 45.6% 08:30` | 新配置建议直接使用 `{cpu_text}`、`{memory_text}`、`{time_text}`。 |
+| `{suffixes}` | 兼容便捷变量，已启用后缀用空格拼接 | `日程:整理插件 正在观察世界 想法:想喝茶` | 新配置可直接使用各个具体后缀变量。 |
 | `{cpu}` | 当前 CPU 使用率数值 | `12.3` | 不带 `%`，用于自定义模板。 |
 | `{memory}` | 当前内存使用率数值 | `45.6` | 不带 `%`，用于自定义模板。 |
 | `{time}` | 当前本地时间 | `08:30` | 格式为 `HH:MM`。 |
 | `{date}` | 当前本地日期 | `2026-07-15` | 格式为 `YYYY-MM-DD`。 |
 | `{weekday}` | 当前星期 | `星期三` | 中文星期文本。 |
 | `{manual_suffix}` | LLM 工具临时设置的后缀 | `今天想安静一点` | 未设置或过期时为空。 |
-| `{thought_suffix}` | 当前会话想法摘要后缀 | `在整理思路` | 需要启用 `thought_summary.enabled`。 |
-| `{schedule_suffix}` | 当天日程后缀 | `整理插件` | 需要启用 `daily_schedule.enabled`。 |
-| `{whim_suffix}` | 随心后缀 | `慢慢加载灵感` | 需要启用 `whim_suffix.enabled`。 |
+| `{thought_suffix}` | 当前会话想法摘要后缀 | `在整理思路` | 自动模式中需要启用 `thought_summary.enabled`；工具 source=thought 也会写入它。 |
+| `{schedule_suffix}` | 当天日程后缀 | `整理插件` | 自动模式中需要启用 `daily_schedule.enabled`；工具 source=schedule 也会写入它。 |
+| `{whim_suffix}` | 随心后缀 | `慢慢加载灵感` | 自动模式中需要启用 `whim_suffix.enabled`；工具 source=whim 也会写入它。 |
 | `{static_suffix}` | 固定后缀 | `在线` | 来自 `base_card.static_suffix`。 |
 
 #### 指标模板变量
@@ -96,12 +104,12 @@ time_template = {time}
 static_suffix -> manual_suffix -> schedule_suffix -> whim_suffix -> thought_suffix
 ```
 
-各段之间使用 `base_card.suffix_separator`。如果某个后缀为空，它会被跳过。
+`{suffixes}` 内部用单个空格拼接。如果你需要 ` / `、` | ` 之类的分隔符，建议直接在 `card_template` 中使用具体后缀变量手动排版。
 
 例如：
 
 ```text
-{bot_name} | {metrics} | {suffixes}
+{bot_name} | {cpu_text} | {memory_text} | {time_text} | {manual_suffix} {schedule_suffix} {whim_suffix} {thought_suffix}
 ```
 
 如果你只想显示名字和当前想法，可以写：
@@ -118,7 +126,9 @@ static_suffix -> manual_suffix -> schedule_suffix -> whim_suffix -> thought_suff
 
 ### thought_summary
 
-启用后，插件会记录当前会话最近几条用户消息和 bot 回复，达到 `refresh_seconds` 后调用 LLM 生成一个很短的“当前想法”后缀。
+自动模式中启用后，插件会记录当前会话最近几条用户消息和 bot 回复，达到 `refresh_seconds` 后调用 LLM 生成一个很短的“当前想法”后缀。
+
+提醒工具模式中，如果 `llm_tool.reminder_source` 选择 `thought` 或 `random`，也会按本组参数生成建议后缀。
 
 ### daily_schedule
 
@@ -143,15 +153,23 @@ daily=自由活动
 
 工具名：`set_dynamic_group_card`
 
+当 `general.operation_mode=tool_reminder` 时，插件会隔一段时间在 LLM 请求中提醒 bot：如果她想改自己的群名片，可以主动调用这个工具。提醒可以附带一种建议后缀：
+
+- `reminder_source=thought`：根据当前会话想法生成。
+- `reminder_source=schedule`：使用当天日程。
+- `reminder_source=whim`：随心所欲生成。
+- `reminder_source=random`：三种来源随机选一种。
+
 工具参数：
 
 - `mode=suffix`：设置短后缀。
 - `mode=full_card`：设置完整群名片，需要开启 `allow_full_card`。
 - `mode=clear_manual`：清除 LLM 工具设置的手动内容。
+- `source`：`mode=suffix` 时可用，支持 `manual`、`thought`、`schedule`、`whim`、`random`。`manual` 使用传入的 `suffix`，其他来源由插件生成。
 - `duration_seconds`：手动内容保留时间，`0` 表示一直保留直到清除或插件重载。
 - `reason`：可选，说明为什么要修改。
 
-开启 `inject_status_hint` 后，插件会在 LLM 请求中提示 bot 当前群名片和工具可用性。工具调用成功后，工具结果会返回“已把当前群名片改为……”，因此模型会知道这次名片是自己主动修改的。
+工具调用成功后，工具结果会返回“已把当前群名片改为……”，因此模型会知道这次名片是自己主动修改的。
 
 ## 更新记录
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.2.0
+
+- 收敛群名片格式配置，移除兜底拼接分隔符、系统指标分隔符、动态后缀分隔符，避免和完整名片模板、各指标模板重复控制同一件事。
+- 将默认完整名片模板改为 `{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}`，让最终排版更直观。
+- 新增 `{cpu_text}`、`{memory_text}`、`{time_text}` 变量；保留 `{metrics}` 和 `{suffixes}` 作为固定空格拼接的兼容便捷变量。
+- 新增 `general.operation_mode`，支持 `auto_update` 自动改名片和 `tool_reminder` 定时提醒 bot 主动调用 LLM 工具两种互斥模式。
+- 新增 `llm_tool.reminder_interval_seconds` 和 `llm_tool.reminder_source`，提醒模式可按会话想法、当天日程、随心后缀或三种随机生成建议后缀。
+- 扩展 LLM 工具参数 `source`，支持 `manual`、`thought`、`schedule`、`whim`、`random`。
+- README 更新配置说明，明确模板变量、模式选择和工具提醒行为。
+
 ## v0.1.0
 
 - fork 上游 `zgojin/astrbot_plugin_botName`，并改名为 `astrbot_plugin_dynamic_card_plus`，避免与上游插件 ID、目录、注册类和数据路径冲突。

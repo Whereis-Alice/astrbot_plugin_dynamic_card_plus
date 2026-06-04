@@ -23,7 +23,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.2.0"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -32,7 +32,8 @@ CARD_TOOL_NAME = "set_dynamic_group_card"
 CARD_HINT_MARKER = "[DynamicCardPlus]"
 DEFAULT_TOOL_DESCRIPTION = (
     "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。"
-    "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以在允许时直接给出完整名片。"
+    "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
+    "在配置允许时也可以直接给出完整名片。"
     "只在你确实想改名片时使用，不要每轮对话都调用。"
 )
 
@@ -124,6 +125,7 @@ def _first_clean_line(text: str, max_length: int) -> str:
 class PluginSettings:
     enabled: bool
     debug_log: bool
+    operation_mode: str
     update_interval_seconds: int
     max_card_length: int
     retry_count: int
@@ -132,9 +134,6 @@ class PluginSettings:
 
     bot_name: str
     card_template: str
-    separator: str
-    metric_separator: str
-    suffix_separator: str
     static_suffix: str
     include_cpu: bool
     include_memory: bool
@@ -174,6 +173,8 @@ class PluginSettings:
     llm_tool_allow_full_card: bool
     llm_tool_manual_ttl_seconds: int
     llm_tool_inject_status_hint: bool
+    llm_tool_reminder_interval_seconds: int
+    llm_tool_reminder_source: str
 
 
 @dataclass
@@ -181,6 +182,7 @@ class GroupCardState:
     last_update_at: float = 0.0
     last_card: str = ""
     last_tool_update_at: float = 0.0
+    last_tool_reminder_at: float = 0.0
     last_tool_reason: str = ""
 
     thought_suffix: str = ""
@@ -195,6 +197,7 @@ class GroupCardState:
     manual_until: float = 0.0
 
     recent_messages: deque[str] = field(default_factory=lambda: deque(maxlen=60))
+    last_user_text: str = ""
 
     def has_active_manual_card(self, now: float) -> bool:
         return bool(self.manual_full_card and (self.manual_until <= 0 or self.manual_until > now))
@@ -226,7 +229,12 @@ class DynamicGroupCardTool(FunctionTool[AstrAgentContext]):
                 },
                 "suffix": {
                     "type": "string",
-                    "description": "mode=suffix 时使用。非常短的名片后缀，例如“在想晚饭”或“整理日程中”。",
+                    "description": "mode=suffix 且 source=manual 时使用。非常短的名片后缀，例如“在想晚饭”或“整理日程中”。",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "mode=suffix 时的后缀来源：manual 使用 suffix；thought 根据当前会话想法生成；schedule 使用当天日程；whim 随心生成；random 在三种动态来源中随机。",
+                    "enum": ["manual", "thought", "schedule", "whim", "random"],
                 },
                 "full_card": {
                     "type": "string",
@@ -308,9 +316,18 @@ class DynamicCardPlusPlugin(Star):
         if whim_mode not in {"pool", "llm"}:
             whim_mode = "pool"
 
+        operation_mode = _clean_text(general.get("operation_mode"), "auto_update")
+        if operation_mode not in {"auto_update", "tool_reminder"}:
+            operation_mode = "auto_update"
+
+        reminder_source = _clean_text(tool.get("reminder_source"), "random")
+        if reminder_source not in {"thought", "schedule", "whim", "random"}:
+            reminder_source = "random"
+
         return PluginSettings(
             enabled=_read_bool(general.get("enabled"), True),
             debug_log=_read_bool(general.get("debug_log"), False),
+            operation_mode=operation_mode,
             update_interval_seconds=_read_int(
                 general.get("update_interval_seconds"),
                 60,
@@ -323,11 +340,9 @@ class DynamicCardPlusPlugin(Star):
             blacklist_unified_origins=set(_read_list(general.get("blacklist_unified_origins"), [])),
             bot_name=_clean_text(base_card.get("bot_name"), "AstrBot"),
             card_template=str(
-                base_card.get("card_template", "{bot_name} {metrics} {suffixes}") or ""
+                base_card.get("card_template", "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}")
+                or "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}"
             ).strip(),
-            separator=str(base_card.get("separator", " ") or " "),
-            metric_separator=str(base_card.get("metric_separator", " | ") or " | "),
-            suffix_separator=str(base_card.get("suffix_separator", " / ") or " / "),
             static_suffix=_clean_text(base_card.get("static_suffix")),
             include_cpu=_read_bool(base_card.get("include_cpu"), True),
             include_memory=_read_bool(base_card.get("include_memory"), True),
@@ -408,6 +423,13 @@ class DynamicCardPlusPlugin(Star):
                 maximum=604800,
             ),
             llm_tool_inject_status_hint=_read_bool(tool.get("inject_status_hint"), True),
+            llm_tool_reminder_interval_seconds=_read_int(
+                tool.get("reminder_interval_seconds"),
+                1800,
+                minimum=30,
+                maximum=604800,
+            ),
+            llm_tool_reminder_source=reminder_source,
         )
 
     @filter.on_llm_request()
@@ -429,16 +451,34 @@ class DynamicCardPlusPlugin(Star):
             return
 
         state = self._states[_normalize_id(group_id)]
+        self._remember_user_message(state, event, settings)
+        if settings.operation_mode != "tool_reminder":
+            return
+
+        now = time.time()
+        if now - state.last_tool_reminder_at < settings.llm_tool_reminder_interval_seconds:
+            return
+
         current_card = state.last_card or "还没有记录"
+        suggestion, source_label = await self._build_tool_reminder_suggestion(
+            event=event,
+            state=state,
+            settings=settings,
+            now=now,
+        )
+        suggestion_text = f"建议：{suggestion}（来源：{source_label}）。" if suggestion else ""
         hint = (
-            f"{CARD_HINT_MARKER} 你可以在想调整自己当前 QQ 群名片时调用 "
-            f"{CARD_TOOL_NAME}。当前记录的群名片是：{current_card}。"
-            "如果你只是正常聊天，不需要调用它；如果你调用成功，工具返回会告诉你已经改成什么。"
+            f"{CARD_HINT_MARKER} 已到配置的群名片自主管理提醒时间。"
+            f"当前记录的群名片是：{current_card}。"
+            f"{suggestion_text}"
+            f"如果你想更新自己在当前 QQ 群里的群名片，请主动调用 {CARD_TOOL_NAME}；"
+            "如果你觉得现在不用改，就正常回复用户。工具调用成功后，工具返回会告诉你已经改成什么。"
         )
         system_prompt = str(getattr(req, "system_prompt", "") or "")
         if CARD_HINT_MARKER in system_prompt:
             return
         req.system_prompt = f"{system_prompt}\n\n{hint}".strip() if system_prompt else hint
+        state.last_tool_reminder_at = now
 
     @filter.on_decorating_result()
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
@@ -457,6 +497,8 @@ class DynamicCardPlusPlugin(Star):
         group_key = _normalize_id(group_id)
         state = self._states[group_key]
         self._remember_exchange(state, event, settings)
+        if settings.operation_mode != "auto_update":
+            return
 
         now = time.time()
         if now - state.last_update_at < settings.update_interval_seconds:
@@ -543,12 +585,22 @@ class DynamicCardPlusPlugin(Star):
             if not state.manual_full_card:
                 return ToolExecResult(is_error=True, result="full_card 为空，未修改群名片。")
         else:
-            state.manual_suffix = _truncate(
-                _clean_text(kwargs.get("suffix")),
-                settings.llm_tool_max_length,
-            )
+            source = _clean_text(kwargs.get("source"), "manual")
+            if source not in {"manual", "thought", "schedule", "whim", "random"}:
+                source = "manual"
+            suffix = _clean_text(kwargs.get("suffix"))
+            source_label = "手动后缀"
+            if source != "manual" or not suffix:
+                suffix, source_label = await self._build_suffix_from_source(
+                    event=event,
+                    state=state,
+                    settings=settings,
+                    source=source,
+                    now=now,
+                )
+            state.manual_suffix = _truncate(suffix, settings.llm_tool_max_length)
             state.manual_full_card = ""
-            state.last_tool_reason = reason
+            state.last_tool_reason = reason or source_label
             if not state.manual_suffix:
                 return ToolExecResult(is_error=True, result="suffix 为空，未修改群名片。")
 
@@ -576,7 +628,7 @@ class DynamicCardPlusPlugin(Star):
             new_card,
             reason or "-",
         )
-        suffix_note = f"；原因：{reason}" if reason else ""
+        suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
         return ToolExecResult(result=f"已把当前群名片改为：{new_card}{suffix_note}")
 
     def _extract_group_context(self, event: AstrMessageEvent) -> tuple[Any, str, str] | None:
@@ -614,6 +666,16 @@ class DynamicCardPlusPlugin(Star):
         event: AstrMessageEvent,
         settings: PluginSettings,
     ) -> None:
+        self._remember_user_message(state, event, settings)
+        bot_text = self._result_to_text(event.get_result())
+        self._remember_bot_message(state, bot_text, settings)
+
+    def _remember_user_message(
+        self,
+        state: GroupCardState,
+        event: AstrMessageEvent,
+        settings: PluginSettings,
+    ) -> None:
         user_text = _clean_text(getattr(event, "message_str", ""))
         if not user_text and hasattr(event, "get_message_str"):
             try:
@@ -621,12 +683,25 @@ class DynamicCardPlusPlugin(Star):
             except Exception:
                 user_text = ""
 
-        bot_text = self._result_to_text(event.get_result())
+        if not user_text or user_text == state.last_user_text:
+            return
+        state.last_user_text = user_text
         max_chars = settings.thought_context_message_max_chars
-        if user_text:
-            state.recent_messages.append(f"用户: {_truncate(user_text, max_chars)}")
-        if bot_text:
-            state.recent_messages.append(f"我: {_truncate(bot_text, max_chars)}")
+        state.recent_messages.append(f"用户: {_truncate(user_text, max_chars)}")
+        while len(state.recent_messages) > settings.thought_context_messages:
+            state.recent_messages.popleft()
+
+    def _remember_bot_message(
+        self,
+        state: GroupCardState,
+        bot_text: str,
+        settings: PluginSettings,
+    ) -> None:
+        bot_text = _clean_text(bot_text)
+        if not bot_text:
+            return
+        max_chars = settings.thought_context_message_max_chars
+        state.recent_messages.append(f"我: {_truncate(bot_text, max_chars)}")
 
         while len(state.recent_messages) > settings.thought_context_messages:
             state.recent_messages.popleft()
@@ -653,6 +728,96 @@ class DynamicCardPlusPlugin(Star):
             if text:
                 parts.append(str(text))
         return _clean_text("".join(parts))
+
+    async def _build_tool_reminder_suggestion(
+        self,
+        *,
+        event: AstrMessageEvent,
+        state: GroupCardState,
+        settings: PluginSettings,
+        now: float,
+    ) -> tuple[str, str]:
+        del event, state, now
+        source = settings.llm_tool_reminder_source
+        if source == "random":
+            source = random.choice(["thought", "schedule", "whim"])
+
+        if source == "thought":
+            return (
+                "如果你想把当前会话想法写进名片，请调用工具并设置 mode=suffix、source=thought。",
+                "会话想法摘要",
+            )
+
+        if source == "schedule":
+            schedule = self._build_schedule_suffix(settings)
+            if schedule:
+                return (
+                    f"当天日程后缀可以是“{schedule}”；也可以调用工具并设置 mode=suffix、source=schedule。",
+                    "当天日程",
+                )
+            return (
+                "如果你想把当天日程写进名片，请调用工具并设置 mode=suffix、source=schedule。",
+                "当天日程",
+            )
+
+        if source == "whim":
+            if settings.whim_mode == "pool" and settings.whim_pool:
+                whim = _truncate(random.choice(settings.whim_pool), settings.whim_max_length)
+                return (
+                    f"随心后缀可以是“{whim}”；也可以调用工具并设置 mode=suffix、source=whim。",
+                    "随心后缀",
+                )
+            return (
+                "如果你想随心所欲改名片，请调用工具并设置 mode=suffix、source=whim。",
+                "随心后缀",
+            )
+
+        return "", "动态后缀"
+
+    async def _build_suffix_from_source(
+        self,
+        *,
+        event: AstrMessageEvent,
+        state: GroupCardState,
+        settings: PluginSettings,
+        source: str,
+        now: float,
+    ) -> tuple[str, str]:
+        source = _clean_text(source, "manual")
+        if source == "random":
+            candidates = ["thought", "schedule", "whim"]
+            random.shuffle(candidates)
+            for candidate in candidates:
+                suffix, label = await self._build_suffix_from_source(
+                    event=event,
+                    state=state,
+                    settings=settings,
+                    source=candidate,
+                    now=now,
+                )
+                if suffix:
+                    return suffix, f"随机:{label}"
+            return "", "随机动态来源"
+
+        if source == "thought":
+            suffix = await self._build_thought_suffix(event, state, settings)
+            state.thought_suffix = suffix
+            state.thought_generated_at = now
+            return suffix, "会话想法摘要"
+
+        if source == "schedule":
+            suffix = self._build_schedule_suffix(settings)
+            state.schedule_suffix = suffix
+            state.schedule_generated_at = now
+            return suffix, "当天日程"
+
+        if source == "whim":
+            suffix = await self._build_whim_suffix(event, settings)
+            state.whim_suffix = suffix
+            state.whim_generated_at = now
+            return suffix, "随心后缀"
+
+        return "", "手动后缀"
 
     async def _refresh_dynamic_suffixes(
         self,
@@ -682,25 +847,27 @@ class DynamicCardPlusPlugin(Star):
             return _truncate(_compact_spaces(state.manual_full_card), settings.max_card_length)
 
         metrics = self._collect_metrics()
-        metric_parts = self._build_metric_parts(metrics, settings)
+        cpu_text = _render_template(settings.cpu_template, metrics) if settings.include_cpu else ""
+        memory_text = _render_template(settings.memory_template, metrics) if settings.include_memory else ""
+        time_text = _render_template(settings.time_template, metrics) if settings.include_time else ""
+        metric_parts = [part for part in (_clean_text(cpu_text), _clean_text(memory_text), _clean_text(time_text)) if part]
         suffix_parts = self._build_suffix_parts(state, settings, now)
 
         values = {
             **metrics,
             "bot_name": settings.bot_name,
-            "metrics": settings.metric_separator.join(metric_parts),
-            "suffixes": settings.suffix_separator.join(suffix_parts),
+            "cpu_text": _clean_text(cpu_text),
+            "memory_text": _clean_text(memory_text),
+            "time_text": _clean_text(time_text),
+            "metrics": " ".join(metric_parts),
+            "suffixes": " ".join(suffix_parts),
             "manual_suffix": state.manual_suffix if state.has_active_manual_suffix(now) else "",
             "thought_suffix": state.thought_suffix,
             "schedule_suffix": state.schedule_suffix,
             "whim_suffix": state.whim_suffix,
             "static_suffix": settings.static_suffix,
         }
-        if settings.card_template:
-            card = _render_template(settings.card_template, values)
-        else:
-            parts = [settings.bot_name, values["metrics"], values["suffixes"]]
-            card = settings.separator.join(part for part in parts if part)
+        card = _render_template(settings.card_template, values)
         return _truncate(_compact_spaces(card), settings.max_card_length)
 
     def _collect_metrics(self) -> dict[str, Any]:
@@ -712,20 +879,6 @@ class DynamicCardPlusPlugin(Star):
             "date": now.strftime("%Y-%m-%d"),
             "weekday": self._weekday_name(now),
         }
-
-    def _build_metric_parts(
-        self,
-        metrics: dict[str, Any],
-        settings: PluginSettings,
-    ) -> list[str]:
-        parts: list[str] = []
-        if settings.include_cpu:
-            parts.append(_render_template(settings.cpu_template, metrics))
-        if settings.include_memory:
-            parts.append(_render_template(settings.memory_template, metrics))
-        if settings.include_time:
-            parts.append(_render_template(settings.time_template, metrics))
-        return [part for part in (_clean_text(item) for item in parts) if part]
 
     def _build_suffix_parts(
         self,

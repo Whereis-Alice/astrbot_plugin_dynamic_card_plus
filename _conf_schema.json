@@ -1,7 +1,7 @@
 {
   "general": {
     "type": "object",
-    "description": "基础开关、频率与黑名单",
+    "description": "基础开关、运行模式与黑名单",
     "items": {
       "enabled": {
         "type": "bool",
@@ -13,13 +13,23 @@
         "description": "启用调试日志",
         "default": false
       },
+      "operation_mode": {
+        "type": "string",
+        "description": "群名片更新模式",
+        "default": "auto_update",
+        "options": [
+          "auto_update",
+          "tool_reminder"
+        ],
+        "hint": "auto_update：插件按频率自动修改群名片。tool_reminder：插件只按频率提醒 bot 主动调用 LLM 工具修改群名片。二选一，不会同时运行。"
+      },
       "update_interval_seconds": {
         "type": "int",
-        "description": "自动修改名片最小间隔秒数",
+        "description": "自动改名片间隔秒数",
         "default": 60,
         "min": 5,
         "max": 86400,
-        "hint": "只影响自动更新；LLM 工具另有独立冷却。"
+        "hint": "仅 operation_mode=auto_update 时生效。"
       },
       "max_card_length": {
         "type": "int",
@@ -68,58 +78,46 @@
       "card_template": {
         "type": "string",
         "description": "完整名片模板",
-        "default": "{bot_name} {metrics} {suffixes}",
-        "hint": "可用变量：{bot_name}、{metrics}、{suffixes}、{cpu}、{memory}、{time}、{date}、{weekday}、{manual_suffix}、{thought_suffix}、{schedule_suffix}、{whim_suffix}、{static_suffix}。"
-      },
-      "separator": {
-        "type": "string",
-        "description": "兜底拼接分隔符",
-        "default": " "
-      },
-      "metric_separator": {
-        "type": "string",
-        "description": "系统指标之间的分隔符",
-        "default": " | "
-      },
-      "suffix_separator": {
-        "type": "string",
-        "description": "动态后缀之间的分隔符",
-        "default": " / "
+        "default": "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}",
+        "hint": "最终排版只由这里决定。常用变量：{bot_name}、{cpu_text}、{memory_text}、{time_text}、{suffixes}、{cpu}、{memory}、{time}、{date}、{weekday}、{manual_suffix}、{thought_suffix}、{schedule_suffix}、{whim_suffix}、{static_suffix}。兼容变量 {metrics} 表示三个系统指标用空格拼接。"
       },
       "static_suffix": {
         "type": "string",
         "description": "固定后缀",
         "default": "",
-        "hint": "会和日程、随心后缀、想法摘要等一起进入 {suffixes}。"
+        "hint": "会进入 {suffixes}，也可以直接用 {static_suffix} 放到完整模板里。"
       },
       "include_cpu": {
         "type": "bool",
-        "description": "显示 CPU 使用率",
-        "default": true
+        "description": "生成 CPU 文本",
+        "default": true,
+        "hint": "关闭后 {cpu_text} 为空；{cpu} 数值仍可在完整模板中直接使用。"
       },
       "include_memory": {
         "type": "bool",
-        "description": "显示内存使用率",
-        "default": true
+        "description": "生成内存文本",
+        "default": true,
+        "hint": "关闭后 {memory_text} 为空；{memory} 数值仍可在完整模板中直接使用。"
       },
       "include_time": {
         "type": "bool",
-        "description": "显示当前时间",
-        "default": true
+        "description": "生成时间文本",
+        "default": true,
+        "hint": "关闭后 {time_text} 为空；{time} 仍可在完整模板中直接使用。"
       },
       "cpu_template": {
         "type": "string",
-        "description": "CPU 指标模板",
+        "description": "CPU 文本模板",
         "default": "CPU {cpu}%"
       },
       "memory_template": {
         "type": "string",
-        "description": "内存指标模板",
+        "description": "内存文本模板",
         "default": "MEM {memory}%"
       },
       "time_template": {
         "type": "string",
-        "description": "时间指标模板",
+        "description": "时间文本模板",
         "default": "{time}"
       }
     }
@@ -130,9 +128,9 @@
     "items": {
       "enabled": {
         "type": "bool",
-        "description": "启用想法摘要后缀",
+        "description": "自动模式中启用想法后缀",
         "default": false,
-        "hint": "会根据当前会话最近几轮用户消息和 bot 回复，用 LLM 生成一个短后缀。"
+        "hint": "tool_reminder 模式下，如果 llm_tool.reminder_source 选择 thought 或 random，会按本组参数生成建议。"
       },
       "refresh_seconds": {
         "type": "int",
@@ -180,8 +178,9 @@
     "items": {
       "enabled": {
         "type": "bool",
-        "description": "启用日程后缀",
-        "default": false
+        "description": "自动模式中启用日程后缀",
+        "default": false,
+        "hint": "tool_reminder 模式下，如果 llm_tool.reminder_source 选择 schedule 或 random，会按本组规则生成建议。"
       },
       "refresh_seconds": {
         "type": "int",
@@ -228,8 +227,9 @@
     "items": {
       "enabled": {
         "type": "bool",
-        "description": "启用随心后缀",
-        "default": false
+        "description": "自动模式中启用随心后缀",
+        "default": false,
+        "hint": "tool_reminder 模式下，如果 llm_tool.reminder_source 选择 whim 或 random，会按本组参数生成建议。"
       },
       "refresh_seconds": {
         "type": "int",
@@ -295,7 +295,7 @@
   },
   "llm_tool": {
     "type": "object",
-    "description": "LLM 工具：让 bot 主动修改自己的群名片",
+    "description": "LLM 工具与提醒",
     "items": {
       "enabled": {
         "type": "bool",
@@ -305,7 +305,7 @@
       "description": {
         "type": "text",
         "description": "工具说明",
-        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以在允许时直接给出完整名片。只在你确实想改名片时使用，不要每轮对话都调用。",
+        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以在允许时直接给出完整名片。source 可选 manual、thought、schedule、whim、random。只在你确实想改名片时使用，不要每轮对话都调用。",
         "hint": "这段说明会给 LLM 看，用来决定什么时候调用 set_dynamic_group_card。"
       },
       "min_interval_seconds": {
@@ -338,9 +338,29 @@
       },
       "inject_status_hint": {
         "type": "bool",
-        "description": "在 LLM 请求中注入当前名片和工具提示",
+        "description": "在提醒模式中注入工具提醒",
         "default": true,
-        "hint": "开启后，bot 更容易知道自己可以主动调用工具改群名片。"
+        "hint": "仅 operation_mode=tool_reminder 时生效。"
+      },
+      "reminder_interval_seconds": {
+        "type": "int",
+        "description": "提醒 bot 主动改名片的间隔秒数",
+        "default": 1800,
+        "min": 30,
+        "max": 604800,
+        "hint": "仅 operation_mode=tool_reminder 时生效。到点后，插件会在 LLM 请求中提醒 bot 可主动调用工具。"
+      },
+      "reminder_source": {
+        "type": "string",
+        "description": "提醒时建议的后缀来源",
+        "default": "random",
+        "options": [
+          "thought",
+          "schedule",
+          "whim",
+          "random"
+        ],
+        "hint": "thought=当前会话想法；schedule=当天日程；whim=随心所欲；random=三种来源随机。"
       }
     }
   }
