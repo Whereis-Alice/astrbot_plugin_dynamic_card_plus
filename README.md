@@ -83,6 +83,22 @@ auto_update_mode.card_template
 tool_reminder_mode.card_template
 ```
 
+推荐不叠加写法：
+
+```text
+{bot_name} {manual_suffix}
+```
+
+这个模式下，提醒后 bot 自己调用工具、或者你用自然语言叫 bot 改群名片，默认都会把工具生成的短后缀放进 `{manual_suffix}`，再用 `tool_reminder_mode.card_template` 渲染完整名片。`source=random` 会在 `thought`、`schedule`、`whim` 中随机选择一种来源生成本次后缀。
+
+如果想保留系统指标，也建议明确写在模板里：
+
+```text
+{bot_name} {time_text} {manual_suffix}
+```
+
+每次 `mode=suffix` 工具调用都会替换上一轮工具/动态后缀状态，不会把上次的想法、日程、随心后缀继续叠到这次名片上。
+
 提醒建议来源：
 
 - `thought`：当前会话想法摘要。
@@ -94,10 +110,16 @@ tool_reminder_mode.card_template
 
 两个模式各有独立完整模板。最终分隔符只由完整模板决定，不再提供额外的“系统指标分隔符”“动态后缀分隔符”，避免多个配置同时控制同一件事。
 
-默认模板：
+`auto_update_mode.card_template` 的默认模板是：
 
 ```text
 {bot_name} {cpu_text} {memory_text} {time_text} {suffixes}
+```
+
+`tool_reminder_mode.card_template` 的默认模板是：
+
+```text
+{bot_name} {manual_suffix}
 ```
 
 ### 可用变量
@@ -109,7 +131,7 @@ tool_reminder_mode.card_template
 | `{memory_text}` | 内存文本模板渲染结果 | `MEM 45.6%` | 由 `include_memory` 和 `memory_template` 控制。 |
 | `{time_text}` | 时间文本模板渲染结果 | `08:30` | 由 `include_time` 和 `time_template` 控制。 |
 | `{metrics}` | 三个系统文本用空格拼接 | `CPU 12.3% MEM 45.6% 08:30` | 兼容便捷变量。 |
-| `{suffixes}` | 后缀用空格拼接 | `摸鱼中 日程:整理插件` | 会跳过空值、模板里已显式写出的后缀变量，也会避免和工具后缀原文相同的动态后缀重复出现。 |
+| `{suffixes}` | 后缀用空格拼接 | `摸鱼中 日程:整理插件` | 会跳过空值、模板里已显式写出的后缀变量，也会避免和工具后缀原文相同的动态后缀重复出现。tool_reminder 模式中，每次工具设置后缀前会清理上一轮动态后缀状态。 |
 | `{cpu}` | 当前 CPU 使用率数值 | `12.3` | 不带 `%`。 |
 | `{memory}` | 当前内存使用率数值 | `45.6` | 不带 `%`。 |
 | `{time}` | 当前本地时间 | `08:30` | 格式为 `HH:MM`。 |
@@ -168,6 +190,10 @@ set_dynamic_group_card
 - `source=schedule`：使用当天日程。
 - `source=whim`：生成随心后缀。
 - `source=random`：在 `thought`、`schedule`、`whim` 中随机。
+
+`mode=suffix` 会按当前运行模式的完整名片模板渲染最终名片：`auto_update` 使用 `auto_update_mode.card_template`，`tool_reminder` 使用 `tool_reminder_mode.card_template`。`tool_reminder` 模式中，第二次 `mode=suffix` 会替换上一次工具/动态后缀状态，不会叠加旧后缀。
+
+`mode=full_card` 只有在 `llm_tool.allow_full_card=true` 时生效；它会直接使用传入的完整名片，不再套完整名片模板。默认关闭。
 
 工具调用成功后会返回“已把当前群名片改为……”，因此 bot 会知道这次名片是自己主动改的。
 

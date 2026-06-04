@@ -22,7 +22,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.4.2"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -32,6 +32,7 @@ CARD_HINT_MARKER = "[DynamicCardPlus]"
 DEFAULT_TOOL_DESCRIPTION = (
     "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。"
     "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
+    "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
     "在配置允许时也可以直接给出完整名片。"
     "只在你确实想改名片时使用，不要每轮对话都调用。"
 )
@@ -337,7 +338,8 @@ class DynamicCardPlusPlugin(Star):
         if whim_mode not in {"pool", "llm"}:
             whim_mode = "pool"
 
-        default_card_template = "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}"
+        default_auto_card_template = "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}"
+        default_tool_reminder_card_template = "{bot_name} {manual_suffix}"
 
         operation_mode = _clean_text(
             common.get("operation_mode", legacy_general.get("operation_mode")),
@@ -414,9 +416,9 @@ class DynamicCardPlusPlugin(Star):
             auto_card_template=str(
                 auto_mode.get(
                     "card_template",
-                    legacy_base_card.get("card_template", default_card_template),
+                    legacy_base_card.get("card_template", default_auto_card_template),
                 )
-                or default_card_template
+                or default_auto_card_template
             ).strip(),
             auto_include_thought=_read_bool(
                 auto_mode.get("include_thought_summary", thought.get("enabled")),
@@ -437,7 +439,8 @@ class DynamicCardPlusPlugin(Star):
                 maximum=604800,
             ),
             tool_reminder_card_template=str(
-                reminder_mode.get("card_template", default_card_template) or default_card_template
+                reminder_mode.get("card_template", default_tool_reminder_card_template)
+                or default_tool_reminder_card_template
             ).strip(),
             tool_reminder_inject_hint=_read_bool(
                 reminder_mode.get("inject_status_hint", tool.get("inject_status_hint")),
@@ -655,6 +658,8 @@ class DynamicCardPlusPlugin(Star):
             state.manual_full_card = ""
             state.manual_until = 0.0
             state.last_tool_reason = reason
+            if settings.operation_mode == "tool_reminder":
+                self._clear_dynamic_suffixes(state)
         elif mode == "full_card":
             if not settings.llm_tool_allow_full_card:
                 return "失败：配置不允许 LLM 工具直接设置完整群名片。"
@@ -667,6 +672,8 @@ class DynamicCardPlusPlugin(Star):
             if not state.manual_full_card:
                 return "失败：full_card 为空，未修改群名片。"
         else:
+            if settings.operation_mode == "tool_reminder":
+                self._clear_dynamic_suffixes(state)
             source = _clean_text(kwargs.get("source"), "manual")
             if source not in {"manual", "thought", "schedule", "whim", "random"}:
                 source = "manual"
@@ -712,6 +719,14 @@ class DynamicCardPlusPlugin(Star):
         )
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
         return f"已把当前群名片改为：{new_card}{suffix_note}"
+
+    def _clear_dynamic_suffixes(self, state: GroupCardState) -> None:
+        state.thought_suffix = ""
+        state.schedule_suffix = ""
+        state.whim_suffix = ""
+        state.thought_generated_at = 0.0
+        state.schedule_generated_at = 0.0
+        state.whim_generated_at = 0.0
 
     def _extract_group_context(self, event: AstrMessageEvent) -> tuple[Any, str, str] | None:
         if event.get_platform_name() != "aiocqhttp":

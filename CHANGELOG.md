@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.2
+
+- 提醒工具模式默认完整名片模板改为 `{bot_name} {manual_suffix}`，更适合“bot 主动改一次后缀”的使用方式。
+- `tool_reminder` 模式下，LLM 工具每次 `mode=suffix` 调用都会先清理上一轮想法、日程、随心动态后缀状态，再写入新后缀，避免第二次改名片叠加旧后缀。
+- `tool_reminder` 模式下，`mode=clear_manual` 也会同时清理上一轮动态后缀状态。
+- README 补充提醒工具模式模板、自然语言主动改名片和 `source=random` 的实际渲染规则。
+
 ## v0.4.1
 
 - 修复模板同时使用 `{manual_suffix}` 和 `{suffixes}` 时，工具后缀会重复显示的问题。

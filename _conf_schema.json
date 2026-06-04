@@ -157,8 +157,8 @@
       "card_template": {
         "type": "string",
         "description": "提醒工具模式完整名片模板",
-        "default": "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}",
-        "hint": "仅 common.operation_mode=tool_reminder 时生效。自然语言要求 bot 改名片、或提醒后 bot 主动调用工具时，会使用这个模板。"
+        "default": "{bot_name} {manual_suffix}",
+        "hint": "仅 common.operation_mode=tool_reminder 时生效。自然语言要求 bot 改名片、或提醒后 bot 主动调用工具时都会使用这个模板。推荐用 {bot_name} {manual_suffix}，每次工具设置后缀都会替换上一轮工具/动态后缀状态，避免叠加。"
       },
       "inject_status_hint": {
         "type": "bool",
@@ -364,7 +364,7 @@
       "description": {
         "type": "text",
         "description": "工具说明",
-        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。在配置允许时也可以直接给出完整名片。只在你确实想改名片时使用，不要每轮对话都调用。",
+        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。在配置允许时也可以直接给出完整名片。只在你确实想改名片时使用，不要每轮对话都调用。",
         "hint": "这段说明会给 LLM 看，用来决定什么时候调用 set_dynamic_group_card。"
       },
       "min_interval_seconds": {
