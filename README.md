@@ -75,9 +75,12 @@ auto_update_mode.card_template
 
 ### tool_reminder
 
-`common.operation_mode=tool_reminder` 时，插件不会在后台无消息时醒来改名片。它会按 `tool_reminder_mode.reminder_interval_seconds` 计时；到时间后，下一次有群聊消息进入 LLM 请求时，插件会在请求里提醒 bot 主动调用 `set_dynamic_group_card`。
+`common.operation_mode=tool_reminder` 时，有两种触发方式：
 
-提醒间隔从“上一次注入提醒”的时间开始算，按群分别记录。插件重载后内存状态会重置，下一次有效 LLM 请求会重新判断。
+- `tool_reminder_mode.trigger_mode=llm_request`：不会在后台无消息时醒来改名片。它会按 `tool_reminder_mode.reminder_interval_seconds` 计时；到时间后，下一次有群聊消息进入 LLM 请求时，插件会在请求里提醒 bot 主动调用 `set_dynamic_group_card`。
+- `tool_reminder_mode.trigger_mode=background_task`：插件会启动后台任务，按 `tool_reminder_mode.background_check_interval_seconds` 扫描已记录群；某个群距离上次后台更新超过 `reminder_interval_seconds` 时，插件会直接生成后缀并改群名片。
+
+提醒间隔按群分别记录。`llm_request` 从“上一次注入提醒”开始算；`background_task` 从“上一次后台更新”开始算。后台任务必须先在某个群里见过一次消息，记录 `group_id`、`self_id` 和客户端后，才能在那个群里后台改名片。插件重载后内存状态会重置，需要再次见到群聊事件。
 
 使用的完整模板：
 
@@ -112,6 +115,8 @@ tool_reminder_mode.card_template
 
 - `strong`：默认。到提醒间隔后，要求 bot 本轮优先调用 `set_dynamic_group_card`，工具返回后再回复用户。
 - `suggest`：只给出可选建议，bot 可能选择不调用工具。
+
+`reminder_policy` 只影响 `trigger_mode=llm_request`。`background_task` 是插件后台直接改名片，不需要等待 LLM 自己决定是否调用工具；更新成功后，下一次 LLM 请求会收到一条状态提示，知道群名片已经由后台任务改过。
 
 ## 完整名片模板
 

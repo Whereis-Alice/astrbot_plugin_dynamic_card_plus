@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 import random
 import re
 import time
@@ -22,7 +24,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.4.3"
+PLUGIN_VERSION = "0.5.0"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -163,8 +165,10 @@ class PluginSettings:
     tool_reminder_interval_seconds: int
     tool_reminder_card_template: str
     tool_reminder_inject_hint: bool
+    tool_reminder_trigger_mode: str
     tool_reminder_source: str
     tool_reminder_policy: str
+    tool_reminder_background_check_seconds: int
 
     thought_refresh_seconds: int
     thought_prefix: str
@@ -203,7 +207,14 @@ class GroupCardState:
     last_card: str = ""
     last_tool_update_at: float = 0.0
     last_tool_reminder_at: float = 0.0
+    last_background_update_at: float = 0.0
     last_tool_reason: str = ""
+    pending_background_notice: str = ""
+
+    client: Any = None
+    group_id: str = ""
+    self_id: str = ""
+    unified_msg_origin: str = ""
 
     thought_suffix: str = ""
     thought_generated_at: float = 0.0
@@ -299,10 +310,20 @@ class DynamicCardPlusPlugin(Star):
         self.context = context
         self.config = config or {}
         self._states: dict[str, GroupCardState] = defaultdict(GroupCardState)
+        self._background_task: asyncio.Task[None] | None = None
         self._register_llm_tool()
 
     async def initialize(self) -> None:
         logger.info("[%s] initialized; upstream=%s", PLUGIN_ID, UPSTREAM_REPO)
+        self._start_background_task_if_needed()
+
+    async def terminate(self) -> None:
+        if self._background_task is None:
+            return
+        self._background_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self._background_task
+        self._background_task = None
 
     def _register_llm_tool(self) -> None:
         settings = self._settings()
@@ -313,6 +334,58 @@ class DynamicCardPlusPlugin(Star):
                 active=settings.enabled and settings.llm_tool_enabled,
             )
         )
+
+    def _start_background_task_if_needed(self) -> None:
+        settings = self._settings()
+        if not self._should_run_background_task(settings):
+            return
+        if self._background_task is not None and not self._background_task.done():
+            return
+        self._background_task = asyncio.create_task(self._background_task_loop())
+        logger.info("[%s] background task mode started", PLUGIN_ID)
+
+    def _should_run_background_task(self, settings: PluginSettings) -> bool:
+        return (
+            settings.enabled
+            and settings.operation_mode == "tool_reminder"
+            and settings.tool_reminder_trigger_mode == "background_task"
+        )
+
+    async def _background_task_loop(self) -> None:
+        while True:
+            settings = self._settings()
+            if not self._should_run_background_task(settings):
+                logger.info("[%s] background task mode stopped by config", PLUGIN_ID)
+                return
+            try:
+                await self._run_background_updates(settings)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("[%s] background task tick failed: %r", PLUGIN_ID, exc)
+            await asyncio.sleep(settings.tool_reminder_background_check_seconds)
+
+    async def _run_background_updates(self, settings: PluginSettings) -> None:
+        now = time.time()
+        for group_key, state in list(self._states.items()):
+            if not state.client or not state.group_id or not state.self_id:
+                continue
+            if self._is_blacklisted_origin(state.group_id, state.unified_msg_origin, settings):
+                continue
+            if now - state.last_background_update_at < settings.tool_reminder_interval_seconds:
+                continue
+            try:
+                await self._update_group_card_by_background(
+                    group_key=group_key,
+                    state=state,
+                    settings=settings,
+                    now=now,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                state.last_background_update_at = now
+                logger.warning("[%s] background update failed group=%s error=%r", PLUGIN_ID, group_key, exc)
 
     def _cfg(self, key: str, default: Any = None) -> Any:
         if hasattr(self.config, "get"):
@@ -360,6 +433,10 @@ class DynamicCardPlusPlugin(Star):
         reminder_policy = _clean_text(reminder_mode.get("reminder_policy"), "strong")
         if reminder_policy not in {"strong", "suggest"}:
             reminder_policy = "strong"
+
+        reminder_trigger_mode = _clean_text(reminder_mode.get("trigger_mode"), "llm_request")
+        if reminder_trigger_mode not in {"llm_request", "background_task"}:
+            reminder_trigger_mode = "llm_request"
 
         schedule_mode = _clean_text(schedule.get("mode"), "rules")
         if schedule_mode not in {"rules", "llm"}:
@@ -452,8 +529,15 @@ class DynamicCardPlusPlugin(Star):
                 reminder_mode.get("inject_status_hint", tool.get("inject_status_hint")),
                 True,
             ),
+            tool_reminder_trigger_mode=reminder_trigger_mode,
             tool_reminder_source=reminder_source,
             tool_reminder_policy=reminder_policy,
+            tool_reminder_background_check_seconds=_read_int(
+                reminder_mode.get("background_check_interval_seconds"),
+                60,
+                minimum=5,
+                maximum=3600,
+            ),
             thought_refresh_seconds=_read_int(
                 thought.get("refresh_seconds"),
                 1800,
@@ -541,13 +625,27 @@ class DynamicCardPlusPlugin(Star):
         if group_context is None:
             return
 
-        _, group_id, _ = group_context
+        client, group_id, self_id = group_context
         if self._is_blacklisted(event, group_id, settings):
             return
 
         state = self._states[_normalize_id(group_id)]
+        self._remember_group_target(state, event, client, group_id, self_id)
         self._remember_user_message(state, event, settings)
         if settings.operation_mode != "tool_reminder":
+            return
+
+        if settings.tool_reminder_trigger_mode == "background_task":
+            if state.pending_background_notice:
+                hint = (
+                    f"{CARD_HINT_MARKER} {state.pending_background_notice}"
+                    "这是后台任务完成的群名片更新，请在回复时知道当前群名片已经变化。"
+                )
+                if self._append_provider_hint(req, hint):
+                    state.pending_background_notice = ""
+            return
+
+        if settings.tool_reminder_trigger_mode != "llm_request":
             return
 
         now = time.time()
@@ -580,10 +678,8 @@ class DynamicCardPlusPlugin(Star):
                 "工具调用成功后，先根据工具返回确认新名片，再自然回复用户。"
                 "不要只口头表示要修改；如果没有调用工具，就不要声称已经修改。不要把旧后缀拼进新后缀里。"
             )
-        system_prompt = str(getattr(req, "system_prompt", "") or "")
-        if CARD_HINT_MARKER in system_prompt:
+        if not self._append_provider_hint(req, hint):
             return
-        req.system_prompt = f"{system_prompt}\n\n{hint}".strip() if system_prompt else hint
         state.last_tool_reminder_at = now
         logger.info(
             "[%s] injected tool reminder group=%s policy=%s source=%s",
@@ -592,6 +688,13 @@ class DynamicCardPlusPlugin(Star):
             settings.tool_reminder_policy,
             source,
         )
+
+    def _append_provider_hint(self, req: ProviderRequest, hint: str) -> bool:
+        system_prompt = str(getattr(req, "system_prompt", "") or "")
+        if CARD_HINT_MARKER in system_prompt:
+            return False
+        req.system_prompt = f"{system_prompt}\n\n{hint}".strip() if system_prompt else hint
+        return True
 
     @filter.on_decorating_result()
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
@@ -609,6 +712,7 @@ class DynamicCardPlusPlugin(Star):
 
         group_key = _normalize_id(group_id)
         state = self._states[group_key]
+        self._remember_group_target(state, event, client, group_id, self_id)
         self._remember_exchange(state, event, settings)
         if settings.operation_mode != "auto_update":
             return
@@ -663,6 +767,7 @@ class DynamicCardPlusPlugin(Star):
 
         group_key = _normalize_id(group_id)
         state = self._states[group_key]
+        self._remember_group_target(state, event, client, group_id, self_id)
         now = time.time()
         cooldown_left = settings.llm_tool_min_interval_seconds - (now - state.last_tool_update_at)
         if cooldown_left > 0:
@@ -711,6 +816,7 @@ class DynamicCardPlusPlugin(Star):
                     settings=settings,
                     source=source,
                     now=now,
+                    unified_msg_origin=_normalize_id(getattr(event, "unified_msg_origin", "")),
                 )
             state.manual_suffix = _truncate(suffix, settings.llm_tool_max_length)
             state.manual_full_card = ""
@@ -745,6 +851,62 @@ class DynamicCardPlusPlugin(Star):
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
         return f"已把当前群名片改为：{new_card}{suffix_note}"
 
+    async def _update_group_card_by_background(
+        self,
+        *,
+        group_key: str,
+        state: GroupCardState,
+        settings: PluginSettings,
+        now: float,
+    ) -> None:
+        self._clear_dynamic_suffixes(state)
+        suffix, source_label = await self._build_suffix_from_source(
+            event=None,
+            state=state,
+            settings=settings,
+            source=settings.tool_reminder_source,
+            now=now,
+            unified_msg_origin=state.unified_msg_origin,
+        )
+        state.last_background_update_at = now
+        state.manual_suffix = _truncate(suffix, settings.llm_tool_max_length)
+        state.manual_full_card = ""
+        state.manual_until = 0.0
+        state.last_tool_reason = f"后台任务:{source_label}"
+        if not state.manual_suffix:
+            logger.info("[%s] background generated empty suffix group=%s", PLUGIN_ID, group_key)
+            return
+
+        new_card = self._build_card(state, settings)
+        if not new_card:
+            logger.info("[%s] background generated empty card group=%s", PLUGIN_ID, group_key)
+            return
+
+        if new_card == state.last_card:
+            logger.info("[%s] background card unchanged group=%s card=%s", PLUGIN_ID, group_key, new_card)
+            return
+
+        ok = await self._set_group_card(
+            client=state.client,
+            group_id=state.group_id,
+            self_id=state.self_id,
+            card=new_card,
+            retry_count=settings.retry_count,
+        )
+        if not ok:
+            return
+
+        state.last_card = new_card
+        state.last_update_at = now
+        state.pending_background_notice = f"后台任务已把当前群名片改为：{new_card}；原因：{state.last_tool_reason}。"
+        logger.info(
+            "[%s] background changed group=%s card=%s source=%s",
+            PLUGIN_ID,
+            group_key,
+            new_card,
+            source_label,
+        )
+
     def _clear_dynamic_suffixes(self, state: GroupCardState) -> None:
         state.thought_suffix = ""
         state.schedule_suffix = ""
@@ -771,15 +933,42 @@ class DynamicCardPlusPlugin(Star):
             return None
         return client, group_id, self_id
 
+    def _remember_group_target(
+        self,
+        state: GroupCardState,
+        event: AstrMessageEvent,
+        client: Any,
+        group_id: str,
+        self_id: str,
+    ) -> None:
+        state.client = client
+        state.group_id = _normalize_id(group_id)
+        state.self_id = _normalize_id(self_id)
+        state.unified_msg_origin = _normalize_id(getattr(event, "unified_msg_origin", ""))
+        if state.last_background_update_at <= 0:
+            state.last_background_update_at = time.time()
+
     def _is_blacklisted(
         self,
         event: AstrMessageEvent,
         group_id: str,
         settings: PluginSettings,
     ) -> bool:
+        return self._is_blacklisted_origin(
+            group_id,
+            _normalize_id(getattr(event, "unified_msg_origin", "")),
+            settings,
+        )
+
+    def _is_blacklisted_origin(
+        self,
+        group_id: str,
+        unified_msg_origin: str,
+        settings: PluginSettings,
+    ) -> bool:
         return (
             _normalize_id(group_id) in settings.blacklist_group_ids
-            or _normalize_id(getattr(event, "unified_msg_origin", "")) in settings.blacklist_unified_origins
+            or _normalize_id(unified_msg_origin) in settings.blacklist_unified_origins
         )
 
     def _remember_exchange(
@@ -910,11 +1099,12 @@ class DynamicCardPlusPlugin(Star):
     async def _build_suffix_from_source(
         self,
         *,
-        event: AstrMessageEvent,
+        event: AstrMessageEvent | None,
         state: GroupCardState,
         settings: PluginSettings,
         source: str,
         now: float,
+        unified_msg_origin: str = "",
     ) -> tuple[str, str]:
         source = _clean_text(source, "manual")
         if source == "random":
@@ -927,25 +1117,26 @@ class DynamicCardPlusPlugin(Star):
                     settings=settings,
                     source=candidate,
                     now=now,
+                    unified_msg_origin=unified_msg_origin,
                 )
                 if suffix:
                     return suffix, f"随机:{label}"
             return "", "随机动态来源"
 
         if source == "thought":
-            suffix = await self._build_thought_suffix(event, state, settings)
+            suffix = await self._build_thought_suffix(event, state, settings, unified_msg_origin)
             state.thought_suffix = suffix
             state.thought_generated_at = now
             return suffix, "会话想法摘要"
 
         if source == "schedule":
-            suffix = await self._build_schedule_suffix(event, settings)
+            suffix = await self._build_schedule_suffix(event, settings, unified_msg_origin)
             state.schedule_suffix = suffix
             state.schedule_generated_at = now
             return suffix, "当天日程"
 
         if source == "whim":
-            suffix = await self._build_whim_suffix(event, settings)
+            suffix = await self._build_whim_suffix(event, settings, unified_msg_origin)
             state.whim_suffix = suffix
             state.whim_generated_at = now
             return suffix, "随心后缀"
@@ -1084,8 +1275,9 @@ class DynamicCardPlusPlugin(Star):
 
     async def _build_schedule_suffix(
         self,
-        event: AstrMessageEvent,
+        event: AstrMessageEvent | None,
         settings: PluginSettings,
+        unified_msg_origin: str = "",
     ) -> str:
         if settings.schedule_mode == "llm":
             values = self._schedule_template_values()
@@ -1094,7 +1286,13 @@ class DynamicCardPlusPlugin(Star):
                 f"今天：{values['date']}，{values['weekday']}，当前时间：{values['time']}。\n"
                 f"要求：不超过 {settings.schedule_max_length} 个字。"
             )
-            generated = await self._llm_short_text(event, prompt, settings, settings.schedule_max_length)
+            generated = await self._llm_short_text(
+                event,
+                prompt,
+                settings,
+                settings.schedule_max_length,
+                unified_msg_origin,
+            )
             if generated:
                 return generated
         return self._build_schedule_rule_suffix(settings)
@@ -1154,15 +1352,22 @@ class DynamicCardPlusPlugin(Star):
 
     async def _build_whim_suffix(
         self,
-        event: AstrMessageEvent,
+        event: AstrMessageEvent | None,
         settings: PluginSettings,
+        unified_msg_origin: str = "",
     ) -> str:
         if settings.whim_mode == "llm":
             prompt = (
                 f"{settings.whim_prompt}\n"
                 f"要求：不超过 {settings.whim_max_length} 个字。"
             )
-            generated = await self._llm_short_text(event, prompt, settings, settings.whim_max_length)
+            generated = await self._llm_short_text(
+                event,
+                prompt,
+                settings,
+                settings.whim_max_length,
+                unified_msg_origin,
+            )
             if generated:
                 return generated
         if not settings.whim_pool:
@@ -1171,9 +1376,10 @@ class DynamicCardPlusPlugin(Star):
 
     async def _build_thought_suffix(
         self,
-        event: AstrMessageEvent,
+        event: AstrMessageEvent | None,
         state: GroupCardState,
         settings: PluginSettings,
+        unified_msg_origin: str = "",
     ) -> str:
         if not state.recent_messages:
             return ""
@@ -1184,19 +1390,29 @@ class DynamicCardPlusPlugin(Star):
             f"要求：不超过 {settings.thought_max_length} 个字。\n\n"
             f"最近对话：\n{context_text}"
         )
-        return await self._llm_short_text(event, prompt, settings, settings.thought_max_length)
+        return await self._llm_short_text(
+            event,
+            prompt,
+            settings,
+            settings.thought_max_length,
+            unified_msg_origin,
+        )
 
     async def _llm_short_text(
         self,
-        event: AstrMessageEvent,
+        event: AstrMessageEvent | None,
         prompt: str,
         settings: PluginSettings,
         max_length: int,
+        unified_msg_origin: str = "",
     ) -> str:
         provider_id = settings.llm_provider_id
         if not provider_id:
+            umo = unified_msg_origin
+            if not umo and event is not None:
+                umo = _normalize_id(getattr(event, "unified_msg_origin", ""))
             try:
-                provider_id = await self.context.get_current_chat_provider_id(event.unified_msg_origin)
+                provider_id = await self.context.get_current_chat_provider_id(umo)
             except Exception as exc:
                 logger.warning("[%s] cannot resolve current chat provider: %r", PLUGIN_ID, exc)
                 return ""
