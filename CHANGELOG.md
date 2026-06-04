@@ -1,14 +1,11 @@
 # Changelog
 
-## v0.5.0
+## v0.6.0
 
-- 提醒工具模式新增 `tool_reminder_mode.trigger_mode`：
-  - `llm_request`：到间隔后，在下一次 LLM 请求里提醒 bot 调用工具。
-  - `background_task`：插件后台任务到间隔后直接改已记录群的名片，不依赖群里继续聊天。
-- 新增 `tool_reminder_mode.background_check_interval_seconds`，用于控制后台任务扫描频率。
-- 后台任务会复用 `tool_reminder_mode.reminder_interval_seconds` 和 `tool_reminder_mode.reminder_source`，并继续使用 `tool_reminder_mode.card_template` 渲染最终名片。
-- 插件会在群聊事件中记录 group/client/self_id；后台任务只会处理已经见过且未命中黑名单的群。
-- 后台任务改名片后，会在下一轮 LLM 请求中注入状态提示，让 bot 知道当前群名片已经由后台任务更新。
+- 移除插件直改名片的后台任务触发方式，避免绕过 bot 自己调用 LLM 工具。
+- 提醒工具模式新增 `tool_reminder_mode.trigger_mode=active_agent_cron`：插件为已记录群注册 AstrBot 主动任务，到点后唤醒对应会话，并要求 bot 自己调用 `set_dynamic_group_card` 改群名片。
+- 新增 `tool_reminder_mode.active_cron_expression`，可手动填写 5 段 cron 表达式；留空时会根据 `reminder_interval_seconds` 自动换算为分钟级 cron。
+- LLM 工具的群上下文解析支持从 `unified_msg_origin` 回查已记录群，兼容主动任务唤醒时缺少普通群消息字段的情况。
 
 ## v0.4.3
 

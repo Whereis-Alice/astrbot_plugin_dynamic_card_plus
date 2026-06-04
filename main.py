@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-from contextlib import suppress
+import inspect
 import random
 import re
 import time
@@ -24,7 +23,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.6.0"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -168,7 +167,7 @@ class PluginSettings:
     tool_reminder_trigger_mode: str
     tool_reminder_source: str
     tool_reminder_policy: str
-    tool_reminder_background_check_seconds: int
+    tool_reminder_active_cron_expression: str
 
     thought_refresh_seconds: int
     thought_prefix: str
@@ -207,9 +206,7 @@ class GroupCardState:
     last_card: str = ""
     last_tool_update_at: float = 0.0
     last_tool_reminder_at: float = 0.0
-    last_background_update_at: float = 0.0
     last_tool_reason: str = ""
-    pending_background_notice: str = ""
 
     client: Any = None
     group_id: str = ""
@@ -310,20 +307,14 @@ class DynamicCardPlusPlugin(Star):
         self.context = context
         self.config = config or {}
         self._states: dict[str, GroupCardState] = defaultdict(GroupCardState)
-        self._background_task: asyncio.Task[None] | None = None
+        self._active_cron_jobs: dict[str, str] = {}
         self._register_llm_tool()
 
     async def initialize(self) -> None:
         logger.info("[%s] initialized; upstream=%s", PLUGIN_ID, UPSTREAM_REPO)
-        self._start_background_task_if_needed()
 
     async def terminate(self) -> None:
-        if self._background_task is None:
-            return
-        self._background_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await self._background_task
-        self._background_task = None
+        await self._delete_registered_active_cron_jobs()
 
     def _register_llm_tool(self) -> None:
         settings = self._settings()
@@ -335,57 +326,125 @@ class DynamicCardPlusPlugin(Star):
             )
         )
 
-    def _start_background_task_if_needed(self) -> None:
-        settings = self._settings()
-        if not self._should_run_background_task(settings):
-            return
-        if self._background_task is not None and not self._background_task.done():
-            return
-        self._background_task = asyncio.create_task(self._background_task_loop())
-        logger.info("[%s] background task mode started", PLUGIN_ID)
+    async def _maybe_await(self, value: Any) -> Any:
+        if inspect.isawaitable(value):
+            return await value
+        return value
 
-    def _should_run_background_task(self, settings: PluginSettings) -> bool:
-        return (
-            settings.enabled
-            and settings.operation_mode == "tool_reminder"
-            and settings.tool_reminder_trigger_mode == "background_task"
+    async def _ensure_active_cron_job(self, group_key: str, state: GroupCardState, settings: PluginSettings) -> None:
+        if group_key in self._active_cron_jobs:
+            return
+        if not state.unified_msg_origin:
+            return
+        cron_mgr = getattr(self.context, "cron_manager", None)
+        if cron_mgr is None:
+            logger.warning("[%s] cron_manager unavailable; cannot register active cron job", PLUGIN_ID)
+            return
+
+        name = self._active_cron_job_name(group_key)
+        await self._delete_active_cron_job_by_name(name)
+        cron_expression = self._active_cron_expression(settings)
+        payload = {
+            "session": state.unified_msg_origin,
+            "note": self._active_cron_note(settings),
+        }
+        try:
+            job = await self._maybe_await(
+                cron_mgr.add_active_job(
+                    name=name,
+                    cron_expression=cron_expression,
+                    payload=payload,
+                    run_once=False,
+                    description="Dynamic Card Plus 主动唤醒 bot 改群名片",
+                )
+            )
+        except Exception as exc:
+            logger.warning("[%s] add active cron job failed group=%s error=%r", PLUGIN_ID, group_key, exc)
+            return
+
+        job_id = self._cron_job_value(job, "id", "job_id") or name
+        self._active_cron_jobs[group_key] = str(job_id)
+        logger.info(
+            "[%s] registered active cron group=%s cron=%s job=%s",
+            PLUGIN_ID,
+            group_key,
+            cron_expression,
+            job_id,
         )
 
-    async def _background_task_loop(self) -> None:
-        while True:
-            settings = self._settings()
-            if not self._should_run_background_task(settings):
-                logger.info("[%s] background task mode stopped by config", PLUGIN_ID)
-                return
+    async def _delete_registered_active_cron_jobs(self) -> None:
+        cron_mgr = getattr(self.context, "cron_manager", None)
+        if cron_mgr is None:
+            self._active_cron_jobs.clear()
+            return
+        for job_id in list(self._active_cron_jobs.values()):
             try:
-                await self._run_background_updates(settings)
-            except asyncio.CancelledError:
-                raise
+                await self._maybe_await(cron_mgr.delete_job(job_id))
             except Exception as exc:
-                logger.warning("[%s] background task tick failed: %r", PLUGIN_ID, exc)
-            await asyncio.sleep(settings.tool_reminder_background_check_seconds)
+                logger.warning("[%s] delete active cron job failed job=%s error=%r", PLUGIN_ID, job_id, exc)
+        self._active_cron_jobs.clear()
 
-    async def _run_background_updates(self, settings: PluginSettings) -> None:
-        now = time.time()
-        for group_key, state in list(self._states.items()):
-            if not state.client or not state.group_id or not state.self_id:
+    async def _delete_active_cron_job_by_name(self, name: str) -> None:
+        cron_mgr = getattr(self.context, "cron_manager", None)
+        if cron_mgr is None:
+            return
+        try:
+            try:
+                jobs = await self._maybe_await(cron_mgr.list_jobs("active"))
+            except TypeError:
+                jobs = await self._maybe_await(cron_mgr.list_jobs())
+        except Exception as exc:
+            logger.warning("[%s] list active cron jobs failed: %r", PLUGIN_ID, exc)
+            return
+
+        for job in jobs or []:
+            if self._cron_job_value(job, "name") != name:
                 continue
-            if self._is_blacklisted_origin(state.group_id, state.unified_msg_origin, settings):
-                continue
-            if now - state.last_background_update_at < settings.tool_reminder_interval_seconds:
+            job_id = self._cron_job_value(job, "id", "job_id")
+            if not job_id:
                 continue
             try:
-                await self._update_group_card_by_background(
-                    group_key=group_key,
-                    state=state,
-                    settings=settings,
-                    now=now,
-                )
-            except asyncio.CancelledError:
-                raise
+                await self._maybe_await(cron_mgr.delete_job(job_id))
+                logger.info("[%s] deleted stale active cron job name=%s id=%s", PLUGIN_ID, name, job_id)
             except Exception as exc:
-                state.last_background_update_at = now
-                logger.warning("[%s] background update failed group=%s error=%r", PLUGIN_ID, group_key, exc)
+                logger.warning("[%s] delete stale active cron job failed id=%s error=%r", PLUGIN_ID, job_id, exc)
+
+    def _cron_job_value(self, job: Any, *names: str) -> Any:
+        if isinstance(job, dict):
+            for name in names:
+                if name in job:
+                    return job[name]
+            return None
+        for name in names:
+            value = getattr(job, name, None)
+            if value is not None:
+                return value
+        return None
+
+    def _active_cron_job_name(self, group_key: str) -> str:
+        return f"{PLUGIN_ID}:group_card:{group_key}"
+
+    def _active_cron_expression(self, settings: PluginSettings) -> str:
+        if settings.tool_reminder_active_cron_expression:
+            return settings.tool_reminder_active_cron_expression
+
+        minutes = max(1, round(settings.tool_reminder_interval_seconds / 60))
+        if minutes < 60:
+            return f"*/{minutes} * * * *"
+        if minutes % 60 == 0:
+            hours = max(1, min(23, minutes // 60))
+            return f"0 */{hours} * * *"
+        return "*/30 * * * *"
+
+    def _active_cron_note(self, settings: PluginSettings) -> str:
+        source = settings.tool_reminder_source
+        return (
+            f"{CARD_HINT_MARKER} 群名片自主管理定时任务已触发。"
+            f"请你现在主动调用 {CARD_TOOL_NAME}，参数使用 mode=suffix、source={source}、"
+            "reason=群名片自主管理定时任务。"
+            "这次动作必须由你通过工具完成；工具返回后，再简短说明当前群名片已经改成什么。"
+            "不要只口头表示要修改，也不要把旧后缀拼进新后缀里。"
+        )
 
     def _cfg(self, key: str, default: Any = None) -> Any:
         if hasattr(self.config, "get"):
@@ -435,7 +494,7 @@ class DynamicCardPlusPlugin(Star):
             reminder_policy = "strong"
 
         reminder_trigger_mode = _clean_text(reminder_mode.get("trigger_mode"), "llm_request")
-        if reminder_trigger_mode not in {"llm_request", "background_task"}:
+        if reminder_trigger_mode not in {"llm_request", "active_agent_cron"}:
             reminder_trigger_mode = "llm_request"
 
         schedule_mode = _clean_text(schedule.get("mode"), "rules")
@@ -532,12 +591,7 @@ class DynamicCardPlusPlugin(Star):
             tool_reminder_trigger_mode=reminder_trigger_mode,
             tool_reminder_source=reminder_source,
             tool_reminder_policy=reminder_policy,
-            tool_reminder_background_check_seconds=_read_int(
-                reminder_mode.get("background_check_interval_seconds"),
-                60,
-                minimum=5,
-                maximum=3600,
-            ),
+            tool_reminder_active_cron_expression=_clean_text(reminder_mode.get("active_cron_expression")),
             thought_refresh_seconds=_read_int(
                 thought.get("refresh_seconds"),
                 1800,
@@ -630,19 +684,9 @@ class DynamicCardPlusPlugin(Star):
             return
 
         state = self._states[_normalize_id(group_id)]
-        self._remember_group_target(state, event, client, group_id, self_id)
+        await self._remember_group_target(state, event, client, group_id, self_id, settings)
         self._remember_user_message(state, event, settings)
         if settings.operation_mode != "tool_reminder":
-            return
-
-        if settings.tool_reminder_trigger_mode == "background_task":
-            if state.pending_background_notice:
-                hint = (
-                    f"{CARD_HINT_MARKER} {state.pending_background_notice}"
-                    "这是后台任务完成的群名片更新，请在回复时知道当前群名片已经变化。"
-                )
-                if self._append_provider_hint(req, hint):
-                    state.pending_background_notice = ""
             return
 
         if settings.tool_reminder_trigger_mode != "llm_request":
@@ -712,7 +756,7 @@ class DynamicCardPlusPlugin(Star):
 
         group_key = _normalize_id(group_id)
         state = self._states[group_key]
-        self._remember_group_target(state, event, client, group_id, self_id)
+        await self._remember_group_target(state, event, client, group_id, self_id, settings)
         self._remember_exchange(state, event, settings)
         if settings.operation_mode != "auto_update":
             return
@@ -767,7 +811,7 @@ class DynamicCardPlusPlugin(Star):
 
         group_key = _normalize_id(group_id)
         state = self._states[group_key]
-        self._remember_group_target(state, event, client, group_id, self_id)
+        await self._remember_group_target(state, event, client, group_id, self_id, settings)
         now = time.time()
         cooldown_left = settings.llm_tool_min_interval_seconds - (now - state.last_tool_update_at)
         if cooldown_left > 0:
@@ -851,62 +895,6 @@ class DynamicCardPlusPlugin(Star):
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
         return f"已把当前群名片改为：{new_card}{suffix_note}"
 
-    async def _update_group_card_by_background(
-        self,
-        *,
-        group_key: str,
-        state: GroupCardState,
-        settings: PluginSettings,
-        now: float,
-    ) -> None:
-        self._clear_dynamic_suffixes(state)
-        suffix, source_label = await self._build_suffix_from_source(
-            event=None,
-            state=state,
-            settings=settings,
-            source=settings.tool_reminder_source,
-            now=now,
-            unified_msg_origin=state.unified_msg_origin,
-        )
-        state.last_background_update_at = now
-        state.manual_suffix = _truncate(suffix, settings.llm_tool_max_length)
-        state.manual_full_card = ""
-        state.manual_until = 0.0
-        state.last_tool_reason = f"后台任务:{source_label}"
-        if not state.manual_suffix:
-            logger.info("[%s] background generated empty suffix group=%s", PLUGIN_ID, group_key)
-            return
-
-        new_card = self._build_card(state, settings)
-        if not new_card:
-            logger.info("[%s] background generated empty card group=%s", PLUGIN_ID, group_key)
-            return
-
-        if new_card == state.last_card:
-            logger.info("[%s] background card unchanged group=%s card=%s", PLUGIN_ID, group_key, new_card)
-            return
-
-        ok = await self._set_group_card(
-            client=state.client,
-            group_id=state.group_id,
-            self_id=state.self_id,
-            card=new_card,
-            retry_count=settings.retry_count,
-        )
-        if not ok:
-            return
-
-        state.last_card = new_card
-        state.last_update_at = now
-        state.pending_background_notice = f"后台任务已把当前群名片改为：{new_card}；原因：{state.last_tool_reason}。"
-        logger.info(
-            "[%s] background changed group=%s card=%s source=%s",
-            PLUGIN_ID,
-            group_key,
-            new_card,
-            source_label,
-        )
-
     def _clear_dynamic_suffixes(self, state: GroupCardState) -> None:
         state.thought_suffix = ""
         state.schedule_suffix = ""
@@ -917,36 +905,65 @@ class DynamicCardPlusPlugin(Star):
 
     def _extract_group_context(self, event: AstrMessageEvent) -> tuple[Any, str, str] | None:
         if event.get_platform_name() != "aiocqhttp":
+            known = self._known_group_context_from_event(event)
+            if known is not None:
+                return known
             return None
-        group_id = _normalize_id(getattr(event.message_obj, "group_id", ""))
+        message_obj = getattr(event, "message_obj", None)
+        group_id = _normalize_id(getattr(message_obj, "group_id", ""))
+        self_id = _normalize_id(getattr(message_obj, "self_id", ""))
+        client = getattr(event, "bot", None)
+
         if not group_id:
+            known = self._known_group_context_from_event(event)
+            if known is not None:
+                return known
             return None
-        self_id = _normalize_id(getattr(event.message_obj, "self_id", ""))
+
         if not self_id:
             self_id = _normalize_id(getattr(getattr(event, "bot", None), "self_id", ""))
         if not self_id:
             logger.warning("[%s] cannot resolve bot self_id for group=%s", PLUGIN_ID, group_id)
             return None
-        client = getattr(event, "bot", None)
         if client is None:
+            known = self._known_group_context_from_event(event)
+            if known is not None:
+                return known
             logger.warning("[%s] cannot resolve aiocqhttp client for group=%s", PLUGIN_ID, group_id)
             return None
         return client, group_id, self_id
 
-    def _remember_group_target(
+    def _known_group_context_from_event(self, event: AstrMessageEvent) -> tuple[Any, str, str] | None:
+        unified_msg_origin = _normalize_id(getattr(event, "unified_msg_origin", ""))
+        if not unified_msg_origin:
+            return None
+        for state in self._states.values():
+            if state.unified_msg_origin != unified_msg_origin:
+                continue
+            if state.client and state.group_id and state.self_id:
+                return state.client, state.group_id, state.self_id
+        return None
+
+    async def _remember_group_target(
         self,
         state: GroupCardState,
         event: AstrMessageEvent,
         client: Any,
         group_id: str,
         self_id: str,
+        settings: PluginSettings,
     ) -> None:
         state.client = client
         state.group_id = _normalize_id(group_id)
         state.self_id = _normalize_id(self_id)
         state.unified_msg_origin = _normalize_id(getattr(event, "unified_msg_origin", ""))
-        if state.last_background_update_at <= 0:
-            state.last_background_update_at = time.time()
+        if (
+            settings.enabled
+            and settings.operation_mode == "tool_reminder"
+            and settings.tool_reminder_trigger_mode == "active_agent_cron"
+            and not self._is_blacklisted_origin(state.group_id, state.unified_msg_origin, settings)
+        ):
+            await self._ensure_active_cron_job(state.group_id, state, settings)
 
     def _is_blacklisted(
         self,

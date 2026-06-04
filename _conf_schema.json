@@ -164,7 +164,7 @@
         "type": "bool",
         "description": "定时注入工具提醒",
         "default": true,
-        "hint": "仅 trigger_mode=llm_request 时用于注入工具提醒；background_task 模式下仅用于把后台改名片结果告知下一轮 LLM。"
+        "hint": "仅 trigger_mode=llm_request 时用于注入工具提醒。"
       },
       "trigger_mode": {
         "type": "string",
@@ -172,9 +172,9 @@
         "default": "llm_request",
         "options": [
           "llm_request",
-          "background_task"
+          "active_agent_cron"
         ],
-        "hint": "llm_request=到间隔后，在下一次 LLM 请求里提醒 bot 调用工具；background_task=插件后台任务到间隔后直接改已记录群的名片，不依赖群里继续聊天。"
+        "hint": "llm_request=到间隔后，在下一次 LLM 请求里提醒 bot 调用工具；active_agent_cron=为已记录群注册 AstrBot 主动任务，到点唤醒 bot，让 bot 自己调用 LLM 工具改名片。"
       },
       "reminder_policy": {
         "type": "string",
@@ -198,13 +198,11 @@
         ],
         "hint": "thought=当前会话想法；schedule=当天日程；whim=随心所欲；random=三种来源随机。"
       },
-      "background_check_interval_seconds": {
-        "type": "int",
-        "description": "后台任务检查间隔秒数",
-        "default": 60,
-        "min": 5,
-        "max": 3600,
-        "hint": "仅 trigger_mode=background_task 时生效。后台任务会按这个频率扫描已记录群，真正改名片仍按 reminder_interval_seconds 判断。"
+      "active_cron_expression": {
+        "type": "string",
+        "description": "主动任务 cron 表达式",
+        "default": "",
+        "hint": "仅 trigger_mode=active_agent_cron 时生效。留空时会根据 reminder_interval_seconds 自动换算为分钟级 cron；例如 1800 秒会变成 */30 * * * *。也可以手动填 5 段 cron 表达式。"
       }
     }
   },
