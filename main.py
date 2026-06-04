@@ -23,7 +23,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.7.1"
+PLUGIN_VERSION = "0.7.2"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -720,12 +720,13 @@ class DynamicCardPlusPlugin(Star):
         has_tool = CARD_TOOL_NAME in tool_names
         state.last_tool_reminder_at = now
         logger.info(
-            "[%s] injected tool reminder group=%s source=%s has_tool=%s tools=%s",
+            "[%s] injected tool reminder group=%s source=%s has_tool=%s tool_count=%s tools=%s",
             PLUGIN_ID,
             group_id,
             source,
             has_tool,
-            ",".join(tool_names[:12]) if tool_names else "-",
+            len(tool_names),
+            self._format_tool_names_for_log(tool_names),
         )
         if not has_tool:
             logger.warning(
@@ -771,6 +772,18 @@ class DynamicCardPlusPlugin(Star):
             if name:
                 names.append(name)
         return names
+
+    def _format_tool_names_for_log(self, tool_names: list[str]) -> str:
+        if not tool_names:
+            return "-"
+        visible = list(tool_names[:12])
+        if CARD_TOOL_NAME in tool_names and CARD_TOOL_NAME not in visible:
+            visible = [CARD_TOOL_NAME, *visible[:11]]
+        suffix = ""
+        hidden_count = max(0, len(tool_names) - len(visible))
+        if hidden_count:
+            suffix = f",...(+{hidden_count} more)"
+        return ",".join(visible) + suffix
 
     @filter.on_decorating_result()
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
