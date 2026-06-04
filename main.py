@@ -23,7 +23,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.1"
+PLUGIN_VERSION = "0.8.2"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -442,6 +442,7 @@ class DynamicCardPlusPlugin(Star):
             source_label="主动任务",
             suggestion="请按本次 source 生成或选择新的短后缀。",
             reason="群名片自主管理定时任务",
+            trigger_id="",
         )
 
     def _required_group_card_tool_prompt(
@@ -452,12 +453,17 @@ class DynamicCardPlusPlugin(Star):
         source_label: str,
         suggestion: str,
         reason: str,
+        trigger_id: str = "",
     ) -> str:
         current_card_text = f"当前记录的群名片是：{current_card}。" if current_card else ""
+        trigger_text = f"本次触发编号：{trigger_id}。" if trigger_id else ""
         return (
             f"{CARD_HINT_MARKER} 群名片修改任务。"
             f"{current_card_text}"
+            f"{trigger_text}"
             f"你现在需要调用 {CARD_TOOL_NAME} 修改当前 QQ 群里的群名片。"
+            "这是一次新的独立触发，不是历史里已经完成的那一次；即使之前已经改过名片，本次也必须重新调用工具。"
+            "不要因为上下文里出现过工具返回或已修改记录就跳过本次调用。"
             f"下一条 assistant 行为必须是工具调用 {CARD_TOOL_NAME}，工具调用前禁止输出任何自然语言。"
             f"建议参数：mode=suffix、source={source}、reason={reason}。"
             f"本次来源：{source_label}。{suggestion}"
@@ -728,6 +734,7 @@ class DynamicCardPlusPlugin(Star):
             source_label=source_label,
             suggestion=suggestion,
             reason="群名片自主管理提醒",
+            trigger_id=f"{group_id}-{int(now)}",
         )
         if not self._append_provider_hint(req, hint):
             return
