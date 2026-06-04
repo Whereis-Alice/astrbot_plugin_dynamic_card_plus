@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.0
+
+- 修复 v4.25.2 中 LLM 工具返回 `ToolExecResult(...)` 会触发 `'types.UnionType' object is not callable` 的问题；工具现在返回普通文本，避免“名片实际已修改但模型收到工具错误”的情况。
+- 重排配置结构，拆成 `common`、`card_fields`、`auto_update_mode`、`tool_reminder_mode`、动态来源、LLM 设置和 LLM 工具设置。
+- 自动模式和提醒工具模式各自拥有独立完整名片模板。
+- 明确 `common.operation_mode` 二选一：`auto_update` 自动改群名片，`tool_reminder` 定时提醒 bot 主动调用 LLM 工具。
+- 移除模式配置里的职责冲突：通用名片字段只负责变量生成，模式完整模板负责最终排版。
+- `{suffixes}` 会跳过与 LLM 工具后缀原文相同的动态后缀，避免出现“名片更新中 想法:名片更新中”这类重复。
+- README 补充配置页无法按模式动态隐藏另一组配置的原因：AstrBot 插件 schema 目前只提供静态 `invisible`。
+
 ## v0.2.0
 
 - 收敛群名片格式配置，移除兜底拼接分隔符、系统指标分隔符、动态后缀分隔符，避免和完整名片模板、各指标模板重复控制同一件事。

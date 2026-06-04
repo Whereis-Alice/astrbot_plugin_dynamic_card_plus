@@ -18,12 +18,11 @@ from astrbot.api.message_components import Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.run_context import ContextWrapper
-from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -126,14 +125,12 @@ class PluginSettings:
     enabled: bool
     debug_log: bool
     operation_mode: str
-    update_interval_seconds: int
     max_card_length: int
     retry_count: int
     blacklist_group_ids: set[str]
     blacklist_unified_origins: set[str]
 
     bot_name: str
-    card_template: str
     static_suffix: str
     include_cpu: bool
     include_memory: bool
@@ -142,7 +139,17 @@ class PluginSettings:
     memory_template: str
     time_template: str
 
-    thought_enabled: bool
+    auto_update_interval_seconds: int
+    auto_card_template: str
+    auto_include_thought: bool
+    auto_include_schedule: bool
+    auto_include_whim: bool
+
+    tool_reminder_interval_seconds: int
+    tool_reminder_card_template: str
+    tool_reminder_inject_hint: bool
+    tool_reminder_source: str
+
     thought_refresh_seconds: int
     thought_prefix: str
     thought_prompt: str
@@ -150,14 +157,12 @@ class PluginSettings:
     thought_context_messages: int
     thought_context_message_max_chars: int
 
-    schedule_enabled: bool
     schedule_refresh_seconds: int
     schedule_prefix: str
     schedule_lines: list[str]
     schedule_empty_text: str
     schedule_max_length: int
 
-    whim_enabled: bool
     whim_refresh_seconds: int
     whim_prefix: str
     whim_mode: str
@@ -172,9 +177,6 @@ class PluginSettings:
     llm_tool_max_length: int
     llm_tool_allow_full_card: bool
     llm_tool_manual_ttl_seconds: int
-    llm_tool_inject_status_hint: bool
-    llm_tool_reminder_interval_seconds: int
-    llm_tool_reminder_source: str
 
 
 @dataclass
@@ -257,12 +259,12 @@ class DynamicGroupCardTool(FunctionTool[AstrAgentContext]):
         self,
         context: ContextWrapper[AstrAgentContext],
         **kwargs: Any,
-    ) -> ToolExecResult:
+    ) -> str:
         if self.plugin is None:
-            return ToolExecResult(is_error=True, result="DynamicCardPlus 工具未绑定插件实例，请重载插件。")
+            return "失败：DynamicCardPlus 工具未绑定插件实例，请重载插件。"
         event = getattr(context.context, "event", None)
         if event is None:
-            return ToolExecResult(is_error=True, result="没有当前会话事件，无法判断要修改哪个群名片。")
+            return "失败：没有当前会话事件，无法判断要修改哪个群名片。"
         return await self.plugin.handle_tool_call(event, kwargs)
 
 
@@ -304,8 +306,12 @@ class DynamicCardPlusPlugin(Star):
         return value if isinstance(value, dict) else {}
 
     def _settings(self) -> PluginSettings:
-        general = self._section("general")
-        base_card = self._section("base_card")
+        common = self._section("common")
+        legacy_general = self._section("general")
+        card_fields = self._section("card_fields")
+        legacy_base_card = self._section("base_card")
+        auto_mode = self._section("auto_update_mode")
+        reminder_mode = self._section("tool_reminder_mode")
         thought = self._section("thought_summary")
         schedule = self._section("daily_schedule")
         whim = self._section("whim_suffix")
@@ -316,41 +322,109 @@ class DynamicCardPlusPlugin(Star):
         if whim_mode not in {"pool", "llm"}:
             whim_mode = "pool"
 
-        operation_mode = _clean_text(general.get("operation_mode"), "auto_update")
+        default_card_template = "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}"
+
+        operation_mode = _clean_text(
+            common.get("operation_mode", legacy_general.get("operation_mode")),
+            "auto_update",
+        )
         if operation_mode not in {"auto_update", "tool_reminder"}:
             operation_mode = "auto_update"
 
-        reminder_source = _clean_text(tool.get("reminder_source"), "random")
+        reminder_source = _clean_text(
+            reminder_mode.get("reminder_source", tool.get("reminder_source")),
+            "random",
+        )
         if reminder_source not in {"thought", "schedule", "whim", "random"}:
             reminder_source = "random"
 
         return PluginSettings(
-            enabled=_read_bool(general.get("enabled"), True),
-            debug_log=_read_bool(general.get("debug_log"), False),
+            enabled=_read_bool(common.get("enabled", legacy_general.get("enabled")), True),
+            debug_log=_read_bool(common.get("debug_log", legacy_general.get("debug_log")), False),
             operation_mode=operation_mode,
-            update_interval_seconds=_read_int(
-                general.get("update_interval_seconds"),
+            max_card_length=_read_int(
+                common.get("max_card_length", legacy_general.get("max_card_length")),
+                60,
+                minimum=8,
+                maximum=500,
+            ),
+            retry_count=_read_int(
+                common.get("retry_count", legacy_general.get("retry_count")),
+                3,
+                minimum=1,
+                maximum=10,
+            ),
+            blacklist_group_ids=set(
+                _read_list(common.get("blacklist_group_ids", legacy_general.get("blacklist_group_ids")), [])
+            ),
+            blacklist_unified_origins=set(
+                _read_list(
+                    common.get(
+                        "blacklist_unified_origins",
+                        legacy_general.get("blacklist_unified_origins"),
+                    ),
+                    [],
+                )
+            ),
+            bot_name=_clean_text(card_fields.get("bot_name", legacy_base_card.get("bot_name")), "AstrBot"),
+            static_suffix=_clean_text(card_fields.get("static_suffix", legacy_base_card.get("static_suffix"))),
+            include_cpu=_read_bool(card_fields.get("include_cpu", legacy_base_card.get("include_cpu")), True),
+            include_memory=_read_bool(
+                card_fields.get("include_memory", legacy_base_card.get("include_memory")),
+                True,
+            ),
+            include_time=_read_bool(card_fields.get("include_time", legacy_base_card.get("include_time")), True),
+            cpu_template=_clean_text(
+                card_fields.get("cpu_template", legacy_base_card.get("cpu_template")),
+                "CPU {cpu}%",
+            ),
+            memory_template=_clean_text(
+                card_fields.get("memory_template", legacy_base_card.get("memory_template")),
+                "MEM {memory}%",
+            ),
+            time_template=_clean_text(
+                card_fields.get("time_template", legacy_base_card.get("time_template")),
+                "{time}",
+            ),
+            auto_update_interval_seconds=_read_int(
+                auto_mode.get("update_interval_seconds", legacy_general.get("update_interval_seconds")),
                 60,
                 minimum=5,
                 maximum=86400,
             ),
-            max_card_length=_read_int(general.get("max_card_length"), 60, minimum=8, maximum=500),
-            retry_count=_read_int(general.get("retry_count"), 3, minimum=1, maximum=10),
-            blacklist_group_ids=set(_read_list(general.get("blacklist_group_ids"), [])),
-            blacklist_unified_origins=set(_read_list(general.get("blacklist_unified_origins"), [])),
-            bot_name=_clean_text(base_card.get("bot_name"), "AstrBot"),
-            card_template=str(
-                base_card.get("card_template", "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}")
-                or "{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}"
+            auto_card_template=str(
+                auto_mode.get(
+                    "card_template",
+                    legacy_base_card.get("card_template", default_card_template),
+                )
+                or default_card_template
             ).strip(),
-            static_suffix=_clean_text(base_card.get("static_suffix")),
-            include_cpu=_read_bool(base_card.get("include_cpu"), True),
-            include_memory=_read_bool(base_card.get("include_memory"), True),
-            include_time=_read_bool(base_card.get("include_time"), True),
-            cpu_template=_clean_text(base_card.get("cpu_template"), "CPU {cpu}%"),
-            memory_template=_clean_text(base_card.get("memory_template"), "MEM {memory}%"),
-            time_template=_clean_text(base_card.get("time_template"), "{time}"),
-            thought_enabled=_read_bool(thought.get("enabled"), False),
+            auto_include_thought=_read_bool(
+                auto_mode.get("include_thought_summary", thought.get("enabled")),
+                False,
+            ),
+            auto_include_schedule=_read_bool(
+                auto_mode.get("include_daily_schedule", schedule.get("enabled")),
+                False,
+            ),
+            auto_include_whim=_read_bool(
+                auto_mode.get("include_whim_suffix", whim.get("enabled")),
+                False,
+            ),
+            tool_reminder_interval_seconds=_read_int(
+                reminder_mode.get("reminder_interval_seconds", tool.get("reminder_interval_seconds")),
+                1800,
+                minimum=30,
+                maximum=604800,
+            ),
+            tool_reminder_card_template=str(
+                reminder_mode.get("card_template", default_card_template) or default_card_template
+            ).strip(),
+            tool_reminder_inject_hint=_read_bool(
+                reminder_mode.get("inject_status_hint", tool.get("inject_status_hint")),
+                True,
+            ),
+            tool_reminder_source=reminder_source,
             thought_refresh_seconds=_read_int(
                 thought.get("refresh_seconds"),
                 1800,
@@ -373,7 +447,6 @@ class DynamicCardPlusPlugin(Star):
                 minimum=20,
                 maximum=1000,
             ),
-            schedule_enabled=_read_bool(schedule.get("enabled"), False),
             schedule_refresh_seconds=_read_int(
                 schedule.get("refresh_seconds"),
                 3600,
@@ -384,7 +457,6 @@ class DynamicCardPlusPlugin(Star):
             schedule_lines=_read_list(schedule.get("schedule_lines"), []),
             schedule_empty_text=_clean_text(schedule.get("empty_text")),
             schedule_max_length=_read_int(schedule.get("max_length"), 18, minimum=2, maximum=80),
-            whim_enabled=_read_bool(whim.get("enabled"), False),
             whim_refresh_seconds=_read_int(
                 whim.get("refresh_seconds"),
                 900,
@@ -422,14 +494,6 @@ class DynamicCardPlusPlugin(Star):
                 minimum=0,
                 maximum=604800,
             ),
-            llm_tool_inject_status_hint=_read_bool(tool.get("inject_status_hint"), True),
-            llm_tool_reminder_interval_seconds=_read_int(
-                tool.get("reminder_interval_seconds"),
-                1800,
-                minimum=30,
-                maximum=604800,
-            ),
-            llm_tool_reminder_source=reminder_source,
         )
 
     @filter.on_llm_request()
@@ -439,7 +503,7 @@ class DynamicCardPlusPlugin(Star):
         req: ProviderRequest,
     ) -> None:
         settings = self._settings()
-        if not settings.enabled or not settings.llm_tool_enabled or not settings.llm_tool_inject_status_hint:
+        if not settings.enabled or not settings.llm_tool_enabled or not settings.tool_reminder_inject_hint:
             return
 
         group_context = self._extract_group_context(event)
@@ -456,7 +520,7 @@ class DynamicCardPlusPlugin(Star):
             return
 
         now = time.time()
-        if now - state.last_tool_reminder_at < settings.llm_tool_reminder_interval_seconds:
+        if now - state.last_tool_reminder_at < settings.tool_reminder_interval_seconds:
             return
 
         current_card = state.last_card or "还没有记录"
@@ -501,7 +565,7 @@ class DynamicCardPlusPlugin(Star):
             return
 
         now = time.time()
-        if now - state.last_update_at < settings.update_interval_seconds:
+        if now - state.last_update_at < settings.auto_update_interval_seconds:
             return
 
         await self._refresh_dynamic_suffixes(event, state, settings, now)
@@ -533,30 +597,27 @@ class DynamicCardPlusPlugin(Star):
         self,
         event: AstrMessageEvent,
         kwargs: dict[str, Any],
-    ) -> ToolExecResult:
+    ) -> str:
         settings = self._settings()
         if not settings.enabled:
-            return ToolExecResult(is_error=True, result="DynamicCardPlus 当前已在配置中禁用。")
+            return "失败：DynamicCardPlus 当前已在配置中禁用。"
         if not settings.llm_tool_enabled:
-            return ToolExecResult(is_error=True, result="群名片 LLM 工具当前已在配置中禁用。")
+            return "失败：群名片 LLM 工具当前已在配置中禁用。"
 
         group_context = self._extract_group_context(event)
         if group_context is None:
-            return ToolExecResult(is_error=True, result="只能在 aiocqhttp 的 QQ 群聊里修改群名片。")
+            return "失败：只能在 aiocqhttp 的 QQ 群聊里修改群名片。"
 
         client, group_id, self_id = group_context
         if self._is_blacklisted(event, group_id, settings):
-            return ToolExecResult(is_error=True, result=f"群 {group_id} 在黑名单中，不能使用动态名片插件。")
+            return f"失败：群 {group_id} 在黑名单中，不能使用动态名片插件。"
 
         group_key = _normalize_id(group_id)
         state = self._states[group_key]
         now = time.time()
         cooldown_left = settings.llm_tool_min_interval_seconds - (now - state.last_tool_update_at)
         if cooldown_left > 0:
-            return ToolExecResult(
-                is_error=True,
-                result=f"刚刚已经改过群名片，请约 {int(cooldown_left)} 秒后再试。",
-            )
+            return f"失败：刚刚已经改过群名片，请约 {int(cooldown_left)} 秒后再试。"
 
         mode = _clean_text(kwargs.get("mode"), "suffix")
         reason = _clean_text(kwargs.get("reason"))
@@ -575,7 +636,7 @@ class DynamicCardPlusPlugin(Star):
             state.last_tool_reason = reason
         elif mode == "full_card":
             if not settings.llm_tool_allow_full_card:
-                return ToolExecResult(is_error=True, result="配置不允许 LLM 工具直接设置完整群名片。")
+                return "失败：配置不允许 LLM 工具直接设置完整群名片。"
             state.manual_full_card = _truncate(
                 _clean_text(kwargs.get("full_card")),
                 min(settings.llm_tool_max_length, settings.max_card_length),
@@ -583,7 +644,7 @@ class DynamicCardPlusPlugin(Star):
             state.manual_suffix = ""
             state.last_tool_reason = reason
             if not state.manual_full_card:
-                return ToolExecResult(is_error=True, result="full_card 为空，未修改群名片。")
+                return "失败：full_card 为空，未修改群名片。"
         else:
             source = _clean_text(kwargs.get("source"), "manual")
             if source not in {"manual", "thought", "schedule", "whim", "random"}:
@@ -602,11 +663,11 @@ class DynamicCardPlusPlugin(Star):
             state.manual_full_card = ""
             state.last_tool_reason = reason or source_label
             if not state.manual_suffix:
-                return ToolExecResult(is_error=True, result="suffix 为空，未修改群名片。")
+                return "失败：suffix 为空，未修改群名片。"
 
         new_card = self._build_card(state, settings)
         if not new_card:
-            return ToolExecResult(is_error=True, result="生成的群名片为空，未修改。")
+            return "失败：生成的群名片为空，未修改。"
 
         ok = await self._set_group_card(
             client=client,
@@ -616,7 +677,7 @@ class DynamicCardPlusPlugin(Star):
             retry_count=settings.retry_count,
         )
         if not ok:
-            return ToolExecResult(is_error=True, result=f"尝试修改群 {group_id} 的群名片失败。")
+            return f"失败：尝试修改群 {group_id} 的群名片失败。"
 
         state.last_card = new_card
         state.last_update_at = now
@@ -629,7 +690,7 @@ class DynamicCardPlusPlugin(Star):
             reason or "-",
         )
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
-        return ToolExecResult(result=f"已把当前群名片改为：{new_card}{suffix_note}")
+        return f"已把当前群名片改为：{new_card}{suffix_note}"
 
     def _extract_group_context(self, event: AstrMessageEvent) -> tuple[Any, str, str] | None:
         if event.get_platform_name() != "aiocqhttp":
@@ -738,7 +799,7 @@ class DynamicCardPlusPlugin(Star):
         now: float,
     ) -> tuple[str, str]:
         del event, state, now
-        source = settings.llm_tool_reminder_source
+        source = settings.tool_reminder_source
         if source == "random":
             source = random.choice(["thought", "schedule", "whim"])
 
@@ -828,15 +889,15 @@ class DynamicCardPlusPlugin(Star):
     ) -> None:
         state.clear_expired_manual(now)
 
-        if settings.schedule_enabled and now - state.schedule_generated_at >= settings.schedule_refresh_seconds:
+        if settings.auto_include_schedule and now - state.schedule_generated_at >= settings.schedule_refresh_seconds:
             state.schedule_suffix = self._build_schedule_suffix(settings)
             state.schedule_generated_at = now
 
-        if settings.whim_enabled and now - state.whim_generated_at >= settings.whim_refresh_seconds:
+        if settings.auto_include_whim and now - state.whim_generated_at >= settings.whim_refresh_seconds:
             state.whim_suffix = await self._build_whim_suffix(event, settings)
             state.whim_generated_at = now
 
-        if settings.thought_enabled and now - state.thought_generated_at >= settings.thought_refresh_seconds:
+        if settings.auto_include_thought and now - state.thought_generated_at >= settings.thought_refresh_seconds:
             state.thought_suffix = await self._build_thought_suffix(event, state, settings)
             state.thought_generated_at = now
 
@@ -867,8 +928,13 @@ class DynamicCardPlusPlugin(Star):
             "whim_suffix": state.whim_suffix,
             "static_suffix": settings.static_suffix,
         }
-        card = _render_template(settings.card_template, values)
+        card = _render_template(self._active_card_template(settings), values)
         return _truncate(_compact_spaces(card), settings.max_card_length)
+
+    def _active_card_template(self, settings: PluginSettings) -> str:
+        if settings.operation_mode == "tool_reminder":
+            return settings.tool_reminder_card_template
+        return settings.auto_card_template
 
     def _collect_metrics(self) -> dict[str, Any]:
         now = datetime.now()
@@ -887,15 +953,28 @@ class DynamicCardPlusPlugin(Star):
         now: float,
     ) -> list[str]:
         parts: list[str] = []
+        manual_suffix = state.manual_suffix if state.has_active_manual_suffix(now) else ""
         if settings.static_suffix:
             parts.append(settings.static_suffix)
-        if state.has_active_manual_suffix(now):
-            parts.append(state.manual_suffix)
-        if settings.schedule_enabled and state.schedule_suffix:
+        if manual_suffix:
+            parts.append(manual_suffix)
+        if (
+            (settings.operation_mode == "tool_reminder" or settings.auto_include_schedule)
+            and state.schedule_suffix
+            and state.schedule_suffix != manual_suffix
+        ):
             parts.append(self._with_prefix(settings.schedule_prefix, state.schedule_suffix))
-        if settings.whim_enabled and state.whim_suffix:
+        if (
+            (settings.operation_mode == "tool_reminder" or settings.auto_include_whim)
+            and state.whim_suffix
+            and state.whim_suffix != manual_suffix
+        ):
             parts.append(self._with_prefix(settings.whim_prefix, state.whim_suffix))
-        if settings.thought_enabled and state.thought_suffix:
+        if (
+            (settings.operation_mode == "tool_reminder" or settings.auto_include_thought)
+            and state.thought_suffix
+            and state.thought_suffix != manual_suffix
+        ):
             parts.append(self._with_prefix(settings.thought_prefix, state.thought_suffix))
         return parts
 
