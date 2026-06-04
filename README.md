@@ -1,42 +1,120 @@
-# astrbot_plugin_botName
+# astrbot_plugin_dynamic_card_plus
 
-让机器人学会自己改名片
+增强版动态群名片插件。它会在 bot 于 QQ 群聊发言时，按配置更新自己的群名片，并允许 LLM 主动调用工具修改名片后缀。
 
-# 功能
-在bot进行发言时，获取系统当前cpu占用率，内存占用率，以及当前时间，随后对名片修改
-# 使用
-###  安装依赖库
+## 上游说明
 
-本插件依赖 `psutil` 和 `PyYAML` 这两个 Python 库，你可以使用 `pip`（Python 包管理工具）来完成安装。
+本插件 fork 自 [zgojin/astrbot_plugin_botName](https://github.com/zgojin/astrbot_plugin_botName)。
 
-- **Windows**：按下 `Win + R` 组合键，输入 `cmd` 后回车，即可打开命令提示符窗口；或者在开始菜单中搜索“命令提示符”并打开。
-- **macOS**：打开“应用程序”文件夹，找到“实用工具”文件夹，双击“终端”应用程序。
-- **Linux**：不同发行版打开终端的方式可能不同，常见的是使用快捷键 `Ctrl + Alt + T` 或者在应用程序菜单里找到“终端”打开。
-####  执行安装命令
+当前 fork 仓库：[Whereis-Alice/astrbot_plugin_dynamic_card_plus](https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus)。
 
-在命令行中输入以下命令并回车：
+为了避免和上游插件冲突，本 fork 已改名为：
+
+- 插件目录：`astrbot_plugin_dynamic_card_plus`
+- 插件 ID：`astrbot_plugin_dynamic_card_plus`
+- 注册类：`DynamicCardPlusPlugin`
+- LLM 工具：`set_dynamic_group_card`
+- 数据状态：仅使用本插件内存状态，不再写入上游的 `data/plugins/astrbot_plugin_botname/system_info.yml`
+
+## 功能
+
+- 自动动态群名片：CPU、内存、当前时间。
+- 可配置模板：完整名片、系统指标、分隔符、固定后缀都能在配置面板里改。
+- 当前想法后缀：按频率汇总当前会话最近消息，让模型生成一个短后缀。
+- 当天日程后缀：按日期、星期或 daily 规则选择当天日程。
+- 随心后缀：可从候选池随机，也可让模型随心生成。
+- LLM 主动改名片：注册 `set_dynamic_group_card` 工具，bot 可以自己设置短后缀、清除手动内容，或在允许时直接设置完整名片。
+- 群黑名单：禁止指定群或指定 `unified_msg_origin` 使用本插件。
+
+## 适用范围
+
+当前只支持 `aiocqhttp` 的 QQ 群聊，并通过 OneBot API `set_group_card` 修改 bot 自己的群名片。bot 需要在群内拥有修改自己群名片的权限。
+
+## 依赖
 
 ```bash
-pip install psutil PyYAML
-```
-也可能是
-
-```bash
-pip3 install psutil PyYAML
+pip install -r requirements.txt
 ```
 
-# 更新
-- 1.1 尝试使用自动安装依赖，以及固定编码存读
-- 2.0 弃用yml修改名片，直接使用插件配置，通过插件管理面板配置
-### 配置
-你需要修改`name.yml` 文件
-这个文件的作用是定义群名片的显示格式。你可以根据自己的需求，自由地组合 {cpu_usage}、{memory_usage} 和 {current_time} 这三个参数，并且还能添加自定义的文本内容。以下是一个示例：
+依赖项：
 
-### 这是群名片的格式模板，你可以根据需求自由组合以下参数：
-### {cpu_usage}: 系统的 CPU 使用率，以百分比形式呈现
-### {memory_usage}: 系统的内存使用率，以百分比形式呈现
-### {current_time}: 当前的系统时间，格式为 HH:MM
-```bash
- card_format: "cpu占用 {cpu_usage}%，内存占用 {memory_usage}%，时间 {current_time}" 
+- `psutil`
+
+## 配置概要
+
+### general
+
+- `enabled`：总开关。
+- `update_interval_seconds`：自动更新名片的最小间隔。
+- `max_card_length`：最终名片最大长度。
+- `blacklist_group_ids`：群号黑名单。
+- `blacklist_unified_origins`：完整会话 ID 黑名单。
+
+### base_card
+
+默认模板：
+
+```text
+{bot_name} {metrics} {suffixes}
 ```
 
+常用变量：
+
+```text
+{bot_name} {metrics} {suffixes}
+{cpu} {memory} {time} {date} {weekday}
+{manual_suffix} {thought_suffix} {schedule_suffix} {whim_suffix} {static_suffix}
+```
+
+例如：
+
+```text
+{bot_name} | {metrics} | {suffixes}
+```
+
+### thought_summary
+
+启用后，插件会记录当前会话最近几条用户消息和 bot 回复，达到 `refresh_seconds` 后调用 LLM 生成一个很短的“当前想法”后缀。
+
+### daily_schedule
+
+`schedule_lines` 支持这些写法：
+
+```text
+2026-06-04=今晚整理插件
+06-04=纪念日模式
+星期四=周四日程
+周五=准备周末模式
+daily=自由活动
+```
+
+日程内容里可用 `{date}`、`{time}`、`{weekday}`。
+
+### whim_suffix
+
+- `mode=pool`：从候选池随机选择。
+- `mode=llm`：让模型生成，失败时回退到候选池。
+
+### llm_tool
+
+工具名：`set_dynamic_group_card`
+
+工具参数：
+
+- `mode=suffix`：设置短后缀。
+- `mode=full_card`：设置完整群名片，需要开启 `allow_full_card`。
+- `mode=clear_manual`：清除 LLM 工具设置的手动内容。
+- `duration_seconds`：手动内容保留时间，`0` 表示一直保留直到清除或插件重载。
+- `reason`：可选，说明为什么要修改。
+
+开启 `inject_status_hint` 后，插件会在 LLM 请求中提示 bot 当前群名片和工具可用性。工具调用成功后，工具结果会返回“已把当前群名片改为……”，因此模型会知道这次名片是自己主动修改的。
+
+## 更新记录
+
+### v0.1.0
+
+- fork 上游 `astrbot_plugin_botName` 并完成插件 ID、目录名、元数据与注册标识符改名。
+- 新增动态想法、当天日程、随心后缀。
+- 新增 LLM 工具 `set_dynamic_group_card`。
+- 新增群黑名单和会话黑名单。
+- 配置改为分组 schema，所有主要行为可配置。

@@ -1,50 +1,347 @@
 {
-  "bot_name": {
-    "type": "string",
-    "description": "机器人名字 (将作为群名片的开头)",
-    "hint": "如果留空，则不显示名字。",
-    "default": "插件已加载，插件配置面板可修改格式"
+  "general": {
+    "type": "object",
+    "description": "基础开关、频率与黑名单",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用插件",
+        "default": true
+      },
+      "debug_log": {
+        "type": "bool",
+        "description": "启用调试日志",
+        "default": false
+      },
+      "update_interval_seconds": {
+        "type": "int",
+        "description": "自动修改名片最小间隔秒数",
+        "default": 60,
+        "min": 5,
+        "max": 86400,
+        "hint": "只影响自动更新；LLM 工具另有独立冷却。"
+      },
+      "max_card_length": {
+        "type": "int",
+        "description": "群名片最大长度",
+        "default": 60,
+        "min": 8,
+        "max": 500,
+        "hint": "QQ 群名片实际长度限制可能更低，建议保持精简。"
+      },
+      "retry_count": {
+        "type": "int",
+        "description": "调用 set_group_card 失败后的重试次数",
+        "default": 3,
+        "min": 1,
+        "max": 10
+      },
+      "blacklist_group_ids": {
+        "type": "list",
+        "description": "群黑名单",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "填 QQ 群号。命中的群不会自动改名片，也不能用 LLM 工具改。"
+      },
+      "blacklist_unified_origins": {
+        "type": "list",
+        "description": "会话黑名单",
+        "items": {
+          "type": "string"
+        },
+        "default": [],
+        "hint": "填完整 unified_msg_origin，可用于更细粒度禁用。"
+      }
+    }
   },
-  "cpu_prefix": {
-    "type": "string",
-    "description": "CPU部分的前缀",
-    "hint": "显示在CPU数值之前的内容。例如：🧠、cpu占用:",
-    "default": ""
+  "base_card": {
+    "type": "object",
+    "description": "群名片格式",
+    "items": {
+      "bot_name": {
+        "type": "string",
+        "description": "机器人基础名字",
+        "default": "AstrBot"
+      },
+      "card_template": {
+        "type": "string",
+        "description": "完整名片模板",
+        "default": "{bot_name} {metrics} {suffixes}",
+        "hint": "可用变量：{bot_name}、{metrics}、{suffixes}、{cpu}、{memory}、{time}、{date}、{weekday}、{manual_suffix}、{thought_suffix}、{schedule_suffix}、{whim_suffix}、{static_suffix}。"
+      },
+      "separator": {
+        "type": "string",
+        "description": "兜底拼接分隔符",
+        "default": " "
+      },
+      "metric_separator": {
+        "type": "string",
+        "description": "系统指标之间的分隔符",
+        "default": " | "
+      },
+      "suffix_separator": {
+        "type": "string",
+        "description": "动态后缀之间的分隔符",
+        "default": " / "
+      },
+      "static_suffix": {
+        "type": "string",
+        "description": "固定后缀",
+        "default": "",
+        "hint": "会和日程、随心后缀、想法摘要等一起进入 {suffixes}。"
+      },
+      "include_cpu": {
+        "type": "bool",
+        "description": "显示 CPU 使用率",
+        "default": true
+      },
+      "include_memory": {
+        "type": "bool",
+        "description": "显示内存使用率",
+        "default": true
+      },
+      "include_time": {
+        "type": "bool",
+        "description": "显示当前时间",
+        "default": true
+      },
+      "cpu_template": {
+        "type": "string",
+        "description": "CPU 指标模板",
+        "default": "CPU {cpu}%"
+      },
+      "memory_template": {
+        "type": "string",
+        "description": "内存指标模板",
+        "default": "MEM {memory}%"
+      },
+      "time_template": {
+        "type": "string",
+        "description": "时间指标模板",
+        "default": "{time}"
+      }
+    }
   },
-  "cpu_suffix": {
-    "type": "string",
-    "description": "CPU部分的后缀",
-    "hint": "显示在CPU数值之后的内容。例如：%",
-    "default": ""
+  "thought_summary": {
+    "type": "object",
+    "description": "当前会话想法摘要后缀",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用想法摘要后缀",
+        "default": false,
+        "hint": "会根据当前会话最近几轮用户消息和 bot 回复，用 LLM 生成一个短后缀。"
+      },
+      "refresh_seconds": {
+        "type": "int",
+        "description": "想法摘要刷新间隔秒数",
+        "default": 1800,
+        "min": 30,
+        "max": 604800
+      },
+      "prefix": {
+        "type": "string",
+        "description": "想法后缀前缀",
+        "default": "想法:"
+      },
+      "prompt": {
+        "type": "text",
+        "description": "想法摘要生成提示词",
+        "default": "请根据最近对话，为机器人生成一个适合作为 QQ 群名片后缀的当前想法。只输出后缀本身，不要解释，不要加引号，尽量可爱自然。"
+      },
+      "max_length": {
+        "type": "int",
+        "description": "想法后缀最大长度",
+        "default": 12,
+        "min": 2,
+        "max": 60
+      },
+      "context_messages": {
+        "type": "int",
+        "description": "用于摘要的最近消息条数",
+        "default": 8,
+        "min": 1,
+        "max": 60
+      },
+      "context_message_max_chars": {
+        "type": "int",
+        "description": "每条上下文最多字符数",
+        "default": 120,
+        "min": 20,
+        "max": 1000
+      }
+    }
   },
-  "memory_prefix": {
-    "type": "string",
-    "description": "内存部分的前缀",
-    "hint": "显示在内存数值之前的内容。例如：💾、内存占用:",
-    "default": ""
+  "daily_schedule": {
+    "type": "object",
+    "description": "当天日程后缀",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用日程后缀",
+        "default": false
+      },
+      "refresh_seconds": {
+        "type": "int",
+        "description": "日程后缀刷新间隔秒数",
+        "default": 3600,
+        "min": 30,
+        "max": 604800
+      },
+      "prefix": {
+        "type": "string",
+        "description": "日程后缀前缀",
+        "default": "日程:"
+      },
+      "schedule_lines": {
+        "type": "list",
+        "description": "日程规则",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "周一=整理周计划",
+          "周五=准备周末模式",
+          "daily=自由活动"
+        ],
+        "hint": "支持 YYYY-MM-DD=内容、MM-DD=内容、星期一=内容、周一=内容、daily=内容。内容可用 {date}、{time}、{weekday}。"
+      },
+      "empty_text": {
+        "type": "string",
+        "description": "没有命中日程时的兜底文本",
+        "default": ""
+      },
+      "max_length": {
+        "type": "int",
+        "description": "日程后缀最大长度",
+        "default": 18,
+        "min": 2,
+        "max": 80
+      }
+    }
   },
-  "memory_suffix": {
-    "type": "string",
-    "description": "内存部分的后缀",
-    "hint": "显示在内存数值之后的内容。例如：%",
-    "default": ""
+  "whim_suffix": {
+    "type": "object",
+    "description": "随心所欲后缀",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用随心后缀",
+        "default": false
+      },
+      "refresh_seconds": {
+        "type": "int",
+        "description": "随心后缀刷新间隔秒数",
+        "default": 900,
+        "min": 30,
+        "max": 604800
+      },
+      "prefix": {
+        "type": "string",
+        "description": "随心后缀前缀",
+        "default": ""
+      },
+      "mode": {
+        "type": "string",
+        "description": "随心后缀来源",
+        "default": "pool",
+        "options": [
+          "pool",
+          "llm"
+        ],
+        "hint": "pool 从候选池随机选；llm 调用模型生成，失败时回退到候选池。"
+      },
+      "pool": {
+        "type": "list",
+        "description": "随心后缀候选池",
+        "items": {
+          "type": "string"
+        },
+        "default": [
+          "今天也在发光",
+          "慢慢加载灵感",
+          "有一点点开心",
+          "正在观察世界"
+        ]
+      },
+      "prompt": {
+        "type": "text",
+        "description": "LLM 随心后缀生成提示词",
+        "default": "请随心所欲地生成一个适合作为机器人 QQ 群名片后缀的短句。只输出后缀本身，不要解释，不要加引号，长度很短。"
+      },
+      "max_length": {
+        "type": "int",
+        "description": "随心后缀最大长度",
+        "default": 12,
+        "min": 2,
+        "max": 60
+      }
+    }
   },
-  "time_prefix": {
-    "type": "string",
-    "description": "时间部分的前缀",
-    "hint": "显示在时间数值之前的内容。例如：🕒、时间",
-    "default": ""
+  "llm": {
+    "type": "object",
+    "description": "LLM 生成设置",
+    "items": {
+      "provider_id": {
+        "type": "string",
+        "description": "指定用于生成动态后缀的模型供应商",
+        "_special": "select_provider",
+        "default": "",
+        "hint": "留空时使用当前会话正在使用的 Chat Provider。"
+      }
+    }
   },
-  "time_suffix": {
-    "type": "string",
-    "description": "时间部分的后缀",
-    "hint": "显示在时间数值之后的内容。",
-    "default": ""
-  },
-  "separator": {
-    "type": "string",
-    "description": "各个指标之间的分隔符",
-    "hint": "例如：' | ' 或 '  ,  '",
-    "default": ""
+  "llm_tool": {
+    "type": "object",
+    "description": "LLM 工具：让 bot 主动修改自己的群名片",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "description": "启用 LLM 改名片工具",
+        "default": true
+      },
+      "description": {
+        "type": "text",
+        "description": "工具说明",
+        "default": "当你想主动改变自己在当前 QQ 群里的群名片时，调用这个工具。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以在允许时直接给出完整名片。只在你确实想改名片时使用，不要每轮对话都调用。",
+        "hint": "这段说明会给 LLM 看，用来决定什么时候调用 set_dynamic_group_card。"
+      },
+      "min_interval_seconds": {
+        "type": "int",
+        "description": "LLM 工具最小调用间隔秒数",
+        "default": 30,
+        "min": 0,
+        "max": 86400
+      },
+      "max_length": {
+        "type": "int",
+        "description": "LLM 工具手动后缀最大长度",
+        "default": 18,
+        "min": 2,
+        "max": 120
+      },
+      "allow_full_card": {
+        "type": "bool",
+        "description": "允许 LLM 工具直接设置完整名片",
+        "default": false,
+        "hint": "关闭时，LLM 只能设置后缀，基础名片仍按模板生成。"
+      },
+      "manual_ttl_seconds": {
+        "type": "int",
+        "description": "LLM 工具手动内容保留秒数",
+        "default": 1800,
+        "min": 0,
+        "max": 604800,
+        "hint": "0 表示一直保留，直到 clear_manual、插件重载或配置变化。"
+      },
+      "inject_status_hint": {
+        "type": "bool",
+        "description": "在 LLM 请求中注入当前名片和工具提示",
+        "default": true,
+        "hint": "开启后，bot 更容易知道自己可以主动调用工具改群名片。"
+      }
+    }
   }
 }

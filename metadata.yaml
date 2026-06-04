@@ -1,5 +1,7 @@
-name: bot动态群名片插件 # 这是你的插件的唯一识别名。
-desc: 当机器人在群聊中发送消息时，会动态更新它的群名片。 # 插件简短描述
-version: v2.0 # 插件版本号。格式：v1.1.1 或者 v1.1
-author: 长安某 # 作者
-repo: https://github.com/zgojin/astrbot_plugin_botName # 插件的仓库地址
+name: astrbot_plugin_dynamic_card_plus
+display_name: Dynamic Card Plus
+desc: 增强版动态群名片插件，支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片
+version: v0.1.0
+author: Huli3
+repo: https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus
+astrbot_version: ">=4.16,<5"
