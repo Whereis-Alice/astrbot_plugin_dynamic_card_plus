@@ -27,31 +27,31 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
 PLUGIN_VERSION = "0.8.7"
-PLUGIN_DESC = "??????????????????????????????? LLM ?????"
+PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
 UPSTREAM_REPO = "https://github.com/zgojin/astrbot_plugin_botName"
 CARD_TOOL_NAME = "set_dynamic_group_card"
 CARD_HINT_MARKER = "[DynamicCardPlus]"
 DEFAULT_TOOL_DESCRIPTION = (
-    "???? QQ ???????"
-    "????????????????????????"
-    "???? source=thought?schedule?whim?random ????????"
-    "???????????????????????????"
-    "??????????????????"
+    "修改当前 QQ 群里的群名片。"
+    "可以设置一个短后缀表达此刻想法、心情、日程状态，"
+    "也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
+    "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
+    "在配置允许时也可以直接给出完整名片。"
 )
 DEFAULT_WEEK_SCHEDULE_LINES = [
-    "??=?????",
-    "??=????",
-    "??=????",
-    "??=????",
-    "??=??????",
-    "??=????",
-    "??=????",
+    "周一=整理周计划",
+    "周二=推进待办",
+    "周三=补充能量",
+    "周四=检查进度",
+    "周五=准备周末模式",
+    "周六=自由活动",
+    "周日=慢慢充电",
 ]
 DEFAULT_SCHEDULE_PROMPT = (
-    "?????????????? QQ ???????????"
-    "???????????????????????"
+    "请为自己生成一个适合作为今天 QQ 群名片后缀的日程状态。"
+    "只输出后缀本身，不要解释，不要加引号，尽量短。"
 )
 
 
@@ -65,9 +65,9 @@ def _read_bool(value: Any, default: bool) -> bool:
         return value
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on", "enabled", "??", "?"}:
+        if lowered in {"1", "true", "yes", "on", "enabled", "启用", "是"}:
             return True
-        if lowered in {"0", "false", "no", "off", "disabled", "??", "?"}:
+        if lowered in {"0", "false", "no", "off", "disabled", "禁用", "否"}:
             return False
     if value is None:
         return default
@@ -94,7 +94,7 @@ def _read_list(value: Any, default: list[str] | None = None) -> list[str]:
         items = [_clean_text(item) for item in value]
         return [item for item in items if item]
     if isinstance(value, str):
-        normalized = value.replace("?", ",").replace("?", ";")
+        normalized = value.replace("，", ",").replace("；", ";")
         items = [
             item.strip()
             for chunk in normalized.split(";")
@@ -133,8 +133,8 @@ def _first_clean_line(text: str, max_length: int) -> str:
     if not cleaned:
         return ""
     line = cleaned.splitlines()[0].strip()
-    line = re.sub(r"^[-*#\s`\"'????????]+", "", line)
-    line = line.strip("`\"'????????")
+    line = re.sub(r"^[-*#\s`\"'“”‘’「」『』]+", "", line)
+    line = line.strip("`\"'“”‘’「」『』")
     return _truncate(line, max_length)
 
 
@@ -253,29 +253,29 @@ class DynamicGroupCardTool(FunctionTool[AstrAgentContext]):
             "properties": {
                 "mode": {
                     "type": "string",
-                    "description": "?????suffix ??????full_card ????????clear_manual ????????????",
+                    "description": "操作类型：suffix 设置短后缀，full_card 设置完整群名片，clear_manual 清除手动后缀或完整名片。",
                     "enum": ["suffix", "full_card", "clear_manual"],
                 },
                 "suffix": {
                     "type": "string",
-                    "description": "mode=suffix ? source=manual ??????????????????????????????",
+                    "description": "mode=suffix 且 source=manual 时使用。非常短的名片后缀，例如“在想晚饭”或“整理日程中”。",
                 },
                 "source": {
                     "type": "string",
-                    "description": "mode=suffix ???????manual ?? suffix?thought ???????????schedule ???????whim ?????random ???????????",
+                    "description": "mode=suffix 时的后缀来源：manual 使用 suffix；thought 根据当前会话想法生成；schedule 使用当天日程；whim 随心生成；random 在三种动态来源中随机。",
                     "enum": ["manual", "thought", "schedule", "whim", "random"],
                 },
                 "full_card": {
                     "type": "string",
-                    "description": "mode=full_card ????????????????????????",
+                    "description": "mode=full_card 时使用。完整群名片，只有插件配置允许时才会生效。",
                 },
                 "duration_seconds": {
                     "type": "number",
-                    "description": "????????????????????0 ??????? clear_manual ??????",
+                    "description": "保持手动内容的秒数。留空使用插件默认值，0 表示直到下一次 clear_manual 或插件重载。",
                 },
                 "reason": {
                     "type": "string",
-                    "description": "????????????????????????",
+                    "description": "可选。你为什么想这样改名片，用于日志和工具返回。",
                 },
             },
             "required": ["mode"],
@@ -288,10 +288,10 @@ class DynamicGroupCardTool(FunctionTool[AstrAgentContext]):
         **kwargs: Any,
     ) -> str:
         if self.plugin is None:
-            return "???DynamicCardPlus ????????????????"
+            return "失败：DynamicCardPlus 工具未绑定插件实例，请重载插件。"
         event = getattr(context.context, "event", None)
         if event is None:
-            return "?????????????????????????"
+            return "失败：没有当前会话事件，无法判断要修改哪个群名片。"
         return await self.plugin.handle_tool_call(event, kwargs)
 
 
@@ -420,7 +420,7 @@ class DynamicCardPlusPlugin(Star):
                 cron_expression=cron_expression,
                 payload=payload,
                 run_once=False,
-                description="Dynamic Card Plus ???? bot ????",
+                description="Dynamic Card Plus 主动唤醒 bot 改群名片",
             )
         )
 
@@ -511,9 +511,9 @@ class DynamicCardPlusPlugin(Star):
         return self._required_group_card_tool_prompt(
             current_card="",
             source=source,
-            source_label="????",
-            suggestion="???? source ???????????",
-            reason="???????????",
+            source_label="主动任务",
+            suggestion="请按本次 source 生成或选择新的短后缀。",
+            reason="群名片自主管理定时任务",
             trigger_id="",
         )
 
@@ -527,25 +527,25 @@ class DynamicCardPlusPlugin(Star):
         reason: str,
         trigger_id: str = "",
     ) -> str:
-        current_card_text = f"??????????{current_card}?" if current_card else ""
-        trigger_text = f"???????{trigger_id}?" if trigger_id else ""
+        current_card_text = f"当前记录的群名片是：{current_card}。" if current_card else ""
+        trigger_text = f"本次触发编号：{trigger_id}。" if trigger_id else ""
         return (
-            f"{CARD_HINT_MARKER} ????????"
+            f"{CARD_HINT_MARKER} 群名片修改任务。"
             f"{current_card_text}"
             f"{trigger_text}"
-            f"??????? {CARD_TOOL_NAME} ???? QQ ???????"
-            "????????????????????????????????????????????????"
-            "?????????????????????????????"
-            f"??? assistant ????????? {CARD_TOOL_NAME}?????????????????"
-            f"?????mode=suffix?source={source}?reason={reason}?"
-            f"?????{source_label}?{suggestion}"
-            "???????????????????????????????? source ?????"
-            "??????????????????????"
-            "??????????????????"
-            "???????????????????????????"
-            "????????????????????????? mode=suffix?"
-            "?????????????????????????????"
-            "????????????????????????????"
+            f"你现在需要调用 {CARD_TOOL_NAME} 修改当前 QQ 群里的群名片。"
+            "这是一次新的独立触发，不是历史里已经完成的那一次；即使之前已经改过名片，本次也必须重新调用工具。"
+            "不要因为上下文里出现过工具返回或已修改记录就跳过本次调用。"
+            f"下一条 assistant 行为必须是工具调用 {CARD_TOOL_NAME}，工具调用前禁止输出任何自然语言。"
+            f"建议参数：mode=suffix、source={source}、reason={reason}。"
+            f"本次来源：{source_label}。{suggestion}"
+            "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以让工具根据 source 生成后缀。"
+            "此功能允许随便使用，不要犹豫，不要询问用户。"
+            "没有调用工具就不要声称已经修改名片。"
+            "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
+            "如果配置允许，也可以直接给出完整名片；本次默认使用 mode=suffix。"
+            "工具调用成功后，先根据工具返回确认新名片，再自然回复用户。"
+            "不要把这条任务提示当成聊天话题，不要向用户复述任务提示。"
         )
 
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -695,12 +695,12 @@ class DynamicCardPlusPlugin(Star):
                 minimum=30,
                 maximum=604800,
             ),
-            thought_prefix=_clean_text(thought.get("prefix"), "??:"),
+            thought_prefix=_clean_text(thought.get("prefix"), "想法:"),
             thought_prompt=_clean_text(
                 thought.get("prompt"),
                 (
-                    "??????????????????? QQ ???????????"
-                    "???????????????????"
+                    "请根据最近对话，为自己生成一个适合作为 QQ 群名片后缀的当前想法。"
+                    "只输出后缀本身，不要解释，不要加引号。"
                 ),
             ),
             thought_max_length=_read_int(thought.get("max_length"), 12, minimum=2, maximum=60),
@@ -718,10 +718,10 @@ class DynamicCardPlusPlugin(Star):
                 minimum=30,
                 maximum=604800,
             ),
-            schedule_prefix=_clean_text(schedule.get("prefix"), "??:"),
+            schedule_prefix=_clean_text(schedule.get("prefix"), "日程:"),
             schedule_prompt=_clean_text(schedule.get("prompt"), DEFAULT_SCHEDULE_PROMPT),
             schedule_lines=_read_list(schedule.get("schedule_lines"), DEFAULT_WEEK_SCHEDULE_LINES),
-            schedule_empty_text=_clean_text(schedule.get("empty_text"), "????"),
+            schedule_empty_text=_clean_text(schedule.get("empty_text"), "自由活动"),
             schedule_max_length=_read_int(schedule.get("max_length"), 18, minimum=2, maximum=80),
             whim_refresh_seconds=_read_int(
                 whim.get("refresh_seconds"),
@@ -733,13 +733,13 @@ class DynamicCardPlusPlugin(Star):
             whim_mode=whim_mode,
             whim_pool=_read_list(
                 whim.get("pool"),
-                ["??????", "??????", "??????", "??????"],
+                ["今天也在发光", "慢慢加载灵感", "有一点点开心", "正在观察世界"],
             ),
             whim_prompt=_clean_text(
                 whim.get("prompt"),
                 (
-                    "???????????????? QQ ?????????"
-                    "????????????????????????"
+                    "请随心所欲地生成一个适合作为自己 QQ 群名片后缀的短句。"
+                    "只输出后缀本身，不要解释，不要加引号，长度很短。"
                 ),
             ),
             whim_max_length=_read_int(whim.get("max_length"), 12, minimum=2, maximum=60),
@@ -793,7 +793,7 @@ class DynamicCardPlusPlugin(Star):
         if now - state.last_tool_reminder_at < settings.tool_reminder_interval_seconds:
             return
 
-        current_card = state.last_card or "?????"
+        current_card = state.last_card or "还没有记录"
         suggestion, source_label, source = await self._build_tool_reminder_suggestion(
             event=event,
             state=state,
@@ -805,7 +805,7 @@ class DynamicCardPlusPlugin(Star):
             source=source,
             source_label=source_label,
             suggestion=suggestion,
-            reason="?????????",
+            reason="群名片自主管理提醒",
             trigger_id=f"{group_id}-{int(now)}",
         )
         if not self._append_provider_hint(req, hint):
@@ -955,17 +955,17 @@ class DynamicCardPlusPlugin(Star):
     ) -> str:
         settings = self._settings()
         if not settings.enabled:
-            return "???DynamicCardPlus ??????????"
+            return "失败：DynamicCardPlus 当前已在配置中禁用。"
         if not settings.llm_tool_enabled:
-            return "?????? LLM ????????????"
+            return "失败：群名片 LLM 工具当前已在配置中禁用。"
 
         group_context = self._extract_group_context(event)
         if group_context is None:
-            return "?????? aiocqhttp ? QQ ?????????"
+            return "失败：只能在 aiocqhttp 的 QQ 群聊里修改群名片。"
 
         client, group_id, self_id = group_context
         if self._is_blacklisted(event, group_id, settings):
-            return f"???? {group_id} ?????????????????"
+            return f"失败：群 {group_id} 在黑名单中，不能使用动态名片插件。"
 
         group_key = _normalize_id(group_id)
         state = self._states[group_key]
@@ -973,7 +973,7 @@ class DynamicCardPlusPlugin(Star):
         now = time.time()
         cooldown_left = settings.llm_tool_min_interval_seconds - (now - state.last_tool_update_at)
         if cooldown_left > 0:
-            return f"??????????????? {int(cooldown_left)} ?????"
+            return f"失败：刚刚已经改过群名片，请约 {int(cooldown_left)} 秒后再试。"
 
         mode = _clean_text(kwargs.get("mode"), "suffix")
         reason = _clean_text(kwargs.get("reason"))
@@ -994,7 +994,7 @@ class DynamicCardPlusPlugin(Star):
                 self._clear_dynamic_suffixes(state)
         elif mode == "full_card":
             if not settings.llm_tool_allow_full_card:
-                return "???????? LLM ????????????"
+                return "失败：配置不允许 LLM 工具直接设置完整群名片。"
             state.manual_full_card = _truncate(
                 _clean_text(kwargs.get("full_card")),
                 min(settings.llm_tool_max_length, settings.max_card_length),
@@ -1002,7 +1002,7 @@ class DynamicCardPlusPlugin(Star):
             state.manual_suffix = ""
             state.last_tool_reason = reason
             if not state.manual_full_card:
-                return "???full_card ??????????"
+                return "失败：full_card 为空，未修改群名片。"
         else:
             if settings.operation_mode == "tool_reminder":
                 self._clear_dynamic_suffixes(state)
@@ -1010,7 +1010,7 @@ class DynamicCardPlusPlugin(Star):
             if source not in {"manual", "thought", "schedule", "whim", "random"}:
                 source = "manual"
             suffix = _clean_text(kwargs.get("suffix"))
-            source_label = "????"
+            source_label = "手动后缀"
             if source != "manual" or not suffix:
                 suffix, source_label = await self._build_suffix_from_source(
                     event=event,
@@ -1024,11 +1024,11 @@ class DynamicCardPlusPlugin(Star):
             state.manual_full_card = ""
             state.last_tool_reason = reason or source_label
             if not state.manual_suffix:
-                return "???suffix ??????????"
+                return "失败：suffix 为空，未修改群名片。"
 
         new_card = self._build_card(state, settings)
         if not new_card:
-            return "????????????????"
+            return "失败：生成的群名片为空，未修改。"
 
         ok = await self._set_group_card(
             client=client,
@@ -1038,7 +1038,7 @@ class DynamicCardPlusPlugin(Star):
             retry_count=settings.retry_count,
         )
         if not ok:
-            return f"???????? {group_id} ???????"
+            return f"失败：尝试修改群 {group_id} 的群名片失败。"
 
         state.last_card = new_card
         state.last_update_at = now
@@ -1050,8 +1050,8 @@ class DynamicCardPlusPlugin(Star):
             new_card,
             reason or "-",
         )
-        suffix_note = f"????{state.last_tool_reason}" if state.last_tool_reason else ""
-        return f"??????????{new_card}{suffix_note}"
+        suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
+        return f"已把当前群名片改为：{new_card}{suffix_note}"
 
     def _clear_dynamic_suffixes(self, state: GroupCardState) -> None:
         state.thought_suffix = ""
@@ -1173,7 +1173,7 @@ class DynamicCardPlusPlugin(Star):
             return
         state.last_user_text = user_text
         max_chars = settings.thought_context_message_max_chars
-        state.recent_messages.append(f"??: {_truncate(user_text, max_chars)}")
+        state.recent_messages.append(f"用户: {_truncate(user_text, max_chars)}")
         while len(state.recent_messages) > settings.thought_context_messages:
             state.recent_messages.popleft()
 
@@ -1187,7 +1187,7 @@ class DynamicCardPlusPlugin(Star):
         if not bot_text:
             return
         max_chars = settings.thought_context_message_max_chars
-        state.recent_messages.append(f"?: {_truncate(bot_text, max_chars)}")
+        state.recent_messages.append(f"我: {_truncate(bot_text, max_chars)}")
 
         while len(state.recent_messages) > settings.thought_context_messages:
             state.recent_messages.popleft()
@@ -1230,28 +1230,28 @@ class DynamicCardPlusPlugin(Star):
 
         if source == "thought":
             return (
-                "????????????",
-                "??????",
+                "把当前会话想法写进名片。",
+                "会话想法摘要",
                 "thought",
             )
 
         if source == "schedule":
             if settings.schedule_mode == "llm":
                 return (
-                    "????????????????? LLM ???????",
-                    "????",
+                    "把今天的日程状态写进名片，工具会让 LLM 生成日程后缀。",
+                    "当天日程",
                     "schedule",
                 )
             schedule = self._build_schedule_rule_suffix(settings)
             if schedule:
                 return (
-                    f"???????????{schedule}??",
-                    "????",
+                    f"当天日程后缀可以参考“{schedule}”。",
+                    "当天日程",
                     "schedule",
                 )
             return (
-                "??????????",
-                "????",
+                "把当天日程写进名片。",
+                "当天日程",
                 "schedule",
             )
 
@@ -1259,17 +1259,17 @@ class DynamicCardPlusPlugin(Star):
             if settings.whim_mode == "pool" and settings.whim_pool:
                 whim = _truncate(random.choice(settings.whim_pool), settings.whim_max_length)
                 return (
-                    f"?????????{whim}??",
-                    "????",
+                    f"随心后缀可以参考“{whim}”。",
+                    "随心后缀",
                     "whim",
                 )
             return (
-                "????????????????",
-                "????",
+                "随心所欲生成一个短后缀写进名片。",
+                "随心后缀",
                 "whim",
             )
 
-        return "??????????????", "????", "whim"
+        return "生成一个动态短后缀写进名片。", "动态后缀", "whim"
 
     async def _build_suffix_from_source(
         self,
@@ -1295,28 +1295,28 @@ class DynamicCardPlusPlugin(Star):
                     unified_msg_origin=unified_msg_origin,
                 )
                 if suffix:
-                    return suffix, f"??:{label}"
-            return "", "??????"
+                    return suffix, f"随机:{label}"
+            return "", "随机动态来源"
 
         if source == "thought":
             suffix = await self._build_thought_suffix(event, state, settings, unified_msg_origin)
             state.thought_suffix = suffix
             state.thought_generated_at = now
-            return suffix, "??????"
+            return suffix, "会话想法摘要"
 
         if source == "schedule":
             suffix = await self._build_schedule_suffix(event, settings, unified_msg_origin)
             state.schedule_suffix = suffix
             state.schedule_generated_at = now
-            return suffix, "????"
+            return suffix, "当天日程"
 
         if source == "whim":
             suffix = await self._build_whim_suffix(event, settings, unified_msg_origin)
             state.whim_suffix = suffix
             state.whim_generated_at = now
-            return suffix, "????"
+            return suffix, "随心后缀"
 
-        return "", "????"
+        return "", "手动后缀"
 
     async def _refresh_dynamic_suffixes(
         self,
@@ -1458,8 +1458,8 @@ class DynamicCardPlusPlugin(Star):
             values = self._schedule_template_values()
             prompt = (
                 f"{_render_template(settings.schedule_prompt, values)}\n"
-                f"???{values['date']}?{values['weekday']}??????{values['time']}?\n"
-                f"?????? {settings.schedule_max_length} ???"
+                f"今天：{values['date']}，{values['weekday']}，当前时间：{values['time']}。\n"
+                f"要求：不超过 {settings.schedule_max_length} 个字。"
             )
             generated = await self._llm_short_text(
                 event,
@@ -1506,7 +1506,7 @@ class DynamicCardPlusPlugin(Star):
                 fallback = fallback or value
                 continue
             normalized_key = key.strip().lower()
-            if normalized_key in {"daily", "everyday", "??", "??"}:
+            if normalized_key in {"daily", "everyday", "每天", "每日"}:
                 fallback = fallback or value
                 continue
             if normalized_key in exact_keys:
@@ -1515,7 +1515,7 @@ class DynamicCardPlusPlugin(Star):
 
     def _split_schedule_line(self, line: str) -> tuple[str, str]:
         text = _clean_text(line)
-        for separator in ("=", "?", ":"):
+        for separator in ("=", "：", ":"):
             if separator not in text:
                 continue
             key, value = text.split(separator, 1)
@@ -1534,7 +1534,7 @@ class DynamicCardPlusPlugin(Star):
         if settings.whim_mode == "llm":
             prompt = (
                 f"{settings.whim_prompt}\n"
-                f"?????? {settings.whim_max_length} ???"
+                f"要求：不超过 {settings.whim_max_length} 个字。"
             )
             generated = await self._llm_short_text(
                 event,
@@ -1562,8 +1562,8 @@ class DynamicCardPlusPlugin(Star):
         context_text = "\n".join(list(state.recent_messages)[-settings.thought_context_messages :])
         prompt = (
             f"{settings.thought_prompt}\n"
-            f"?????? {settings.thought_max_length} ???\n\n"
-            f"?????\n{context_text}"
+            f"要求：不超过 {settings.thought_max_length} 个字。\n\n"
+            f"最近对话：\n{context_text}"
         )
         return await self._llm_short_text(
             event,
@@ -1599,8 +1599,8 @@ class DynamicCardPlusPlugin(Star):
                 chat_provider_id=provider_id,
                 prompt=prompt,
                 system_prompt=(
-                    "????? QQ ??????????"
-                    "??????????????? Markdown?"
+                    "你正在生成 QQ 群名片上的极短后缀。"
+                    "只输出后缀文本，不要解释，不要 Markdown。"
                 ),
             )
         except Exception as exc:
@@ -1655,6 +1655,6 @@ class DynamicCardPlusPlugin(Star):
         return False
 
     def _weekday_name(self, when: datetime, *, short: bool = False) -> str:
-        names = ["??", "??", "??", "??", "??", "??", "??"]
-        full_names = ["???", "???", "???", "???", "???", "???", "???"]
+        names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        full_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         return names[when.weekday()] if short else full_names[when.weekday()]
