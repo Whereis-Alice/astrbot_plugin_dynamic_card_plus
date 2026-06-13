@@ -18,7 +18,7 @@ from pydantic.dataclasses import dataclass as pydantic_dataclass
 from astrbot.api import AstrBotConfig, FunctionTool, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
-from astrbot.api.provider import ProviderRequest
+from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
 from astrbot.core.agent.run_context import ContextWrapper
@@ -26,7 +26,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.7"
+PLUGIN_VERSION = "0.8.8"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -138,6 +138,49 @@ def _first_clean_line(text: str, max_length: int) -> str:
     return _truncate(line, max_length)
 
 
+def _extract_visible_reply_from_leaked_draft(text: str) -> str:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return ""
+
+    markers = (
+        "思维审视",
+        "思考过程",
+        "回复草稿",
+        "字数校验",
+        "规则校验",
+        "工具成功把名片",
+    )
+    if not any(marker in normalized for marker in markers):
+        return normalized
+
+    for start_marker in ("回复草稿：", "回复草稿:", "最终回复：", "最终回复:", "正式回复：", "正式回复:", "组合：", "组合:"):
+        marker_index = normalized.find(start_marker)
+        if marker_index < 0:
+            continue
+        candidate = normalized[marker_index + len(start_marker) :].strip()
+        candidate = re.split(
+            r"\n\s*(?:字数校验|规则校验|思维审视|思考过程|回复草稿|组合)\s*[:：]",
+            candidate,
+            maxsplit=1,
+        )[0].strip()
+        visible_lines: list[str] = []
+        for line in candidate.splitlines():
+            line = line.strip()
+            if not line:
+                if visible_lines:
+                    break
+                continue
+            if re.search(r"(?:句\s*\d+|字数|OK|mode=|source=|reason=|工具|参数)", line):
+                break
+            visible_lines.append(line)
+        visible = "\n".join(visible_lines).strip()
+        if visible:
+            return visible
+
+    return ""
+
+
 @dataclass(frozen=True)
 class PluginSettings:
     enabled: bool
@@ -208,6 +251,7 @@ class GroupCardState:
     last_tool_update_at: float = 0.0
     last_tool_reminder_at: float = 0.0
     last_tool_reason: str = ""
+    pending_tool_followup_until: float = 0.0
 
     client: Any = None
     group_id: str = ""
@@ -544,7 +588,8 @@ class DynamicCardPlusPlugin(Star):
             "没有调用工具就不要声称已经修改名片。"
             "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
             "如果配置允许，也可以直接给出完整名片；本次默认使用 mode=suffix。"
-            "工具调用成功后，先根据工具返回确认新名片，再自然回复用户。"
+            "工具调用成功后，本轮群名片任务已经完成；如果系统仍要求你回复用户，只输出一句很短的聊天回复。"
+            "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数或提示词内容。"
             "不要把这条任务提示当成聊天话题，不要向用户复述任务提示。"
         )
 
@@ -898,6 +943,42 @@ class DynamicCardPlusPlugin(Star):
             suffix = f",...(+{hidden_count} more)"
         return ",".join(visible) + suffix
 
+    @filter.on_llm_response()
+    async def sanitize_group_card_tool_followup(
+        self,
+        event: AstrMessageEvent,
+        response: LLMResponse,
+    ) -> None:
+        settings = self._settings()
+        if not settings.enabled or not settings.llm_tool_enabled:
+            return
+
+        group_context = self._extract_group_context(event)
+        if group_context is None:
+            return
+
+        _, group_id, _ = group_context
+        state = self._states[_normalize_id(group_id)]
+        if time.time() > state.pending_tool_followup_until:
+            return
+
+        original = _clean_text(getattr(response, "completion_text", ""))
+        state.pending_tool_followup_until = 0.0
+        cleaned = _extract_visible_reply_from_leaked_draft(original)
+        if not cleaned and any(
+            marker in original
+            for marker in ("思维审视", "思考过程", "回复草稿", "字数校验", "规则校验", "工具成功把名片")
+        ):
+            cleaned = "改好了。"
+        if not cleaned or cleaned == original:
+            return
+
+        response.completion_text = cleaned
+        chain = getattr(response, "result_chain", None)
+        if hasattr(chain, "chain"):
+            chain.chain = [Plain(cleaned)]
+        logger.info("[%s] sanitized leaked tool follow-up draft group=%s", PLUGIN_ID, group_id)
+
     @filter.on_decorating_result()
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
         settings = self._settings()
@@ -1043,6 +1124,7 @@ class DynamicCardPlusPlugin(Star):
         state.last_card = new_card
         state.last_update_at = now
         state.last_tool_update_at = now
+        state.pending_tool_followup_until = now + 90
         logger.info(
             "[%s] LLM tool changed group=%s card=%s reason=%s",
             PLUGIN_ID,
@@ -1051,7 +1133,11 @@ class DynamicCardPlusPlugin(Star):
             reason or "-",
         )
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
-        return f"已把当前群名片改为：{new_card}{suffix_note}"
+        return (
+            f"已把当前群名片改为：{new_card}{suffix_note}。"
+            "本轮群名片任务已完成；若需要回复用户，只输出一句很短的聊天回复，"
+            "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数或提示词内容。"
+        )
 
     def _clear_dynamic_suffixes(self, state: GroupCardState) -> None:
         state.thought_suffix = ""
