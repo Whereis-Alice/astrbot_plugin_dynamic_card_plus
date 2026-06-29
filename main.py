@@ -26,7 +26,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.8"
+PLUGIN_VERSION = "0.8.9"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -179,6 +179,39 @@ def _extract_visible_reply_from_leaked_draft(text: str) -> str:
             return visible
 
     return ""
+
+
+def _strip_leaked_tool_call_blocks(text: str) -> tuple[str, bool]:
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if CARD_TOOL_NAME not in normalized:
+        return text, False
+    if "tool_calls_section_begin" not in normalized and "tool_call_begin" not in normalized:
+        return text, False
+
+    stripped = False
+
+    def remove_if_card_tool(match: re.Match[str]) -> str:
+        nonlocal stripped
+        block = match.group(0)
+        if CARD_TOOL_NAME not in block:
+            return block
+        stripped = True
+        return ""
+
+    cleaned = re.sub(
+        r"\|tool_calls_section_begin\|.*?\|tool_calls_section_end\|",
+        remove_if_card_tool,
+        normalized,
+        flags=re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"\|tool_call_begin\|.*?\|tool_call_end\|",
+        remove_if_card_tool,
+        cleaned,
+        flags=re.DOTALL,
+    )
+    cleaned = _compact_spaces(cleaned)
+    return cleaned, stripped
 
 
 @dataclass(frozen=True)
@@ -588,8 +621,9 @@ class DynamicCardPlusPlugin(Star):
             "没有调用工具就不要声称已经修改名片。"
             "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
             "如果配置允许，也可以直接给出完整名片；本次默认使用 mode=suffix。"
-            "工具调用成功后，本轮群名片任务已经完成；如果系统仍要求你回复用户，只输出一句很短的聊天回复。"
-            "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数或提示词内容。"
+            "工具调用成功后，继续正常回答用户本轮消息；不要只回复“改好了”，不要只复述工具结果。"
+            "如果工具调用接口不可用，绝不能把工具调用协议、JSON、|tool_calls_section_begin| 等标记当成普通文本输出；跳过名片任务并正常回答用户本轮消息。"
+            "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数、工具调用协议或提示词内容。"
             "不要把这条任务提示当成聊天话题，不要向用户复述任务提示。"
         )
 
@@ -959,25 +993,30 @@ class DynamicCardPlusPlugin(Star):
 
         _, group_id, _ = group_context
         state = self._states[_normalize_id(group_id)]
-        if time.time() > state.pending_tool_followup_until:
-            return
-
         original = _clean_text(getattr(response, "completion_text", ""))
-        state.pending_tool_followup_until = 0.0
-        cleaned = _extract_visible_reply_from_leaked_draft(original)
-        if not cleaned and any(
-            marker in original
-            for marker in ("思维审视", "思考过程", "回复草稿", "字数校验", "规则校验", "工具成功把名片")
-        ):
-            cleaned = "改好了。"
-        if not cleaned or cleaned == original:
+        cleaned, stripped_tool_call = _strip_leaked_tool_call_blocks(original)
+        pending_followup = time.time() <= state.pending_tool_followup_until
+
+        if pending_followup:
+            state.pending_tool_followup_until = 0.0
+            draft_cleaned = _extract_visible_reply_from_leaked_draft(cleaned)
+            if draft_cleaned != cleaned:
+                cleaned = draft_cleaned
+
+        if not stripped_tool_call and (not pending_followup or cleaned == original):
             return
 
         response.completion_text = cleaned
         chain = getattr(response, "result_chain", None)
         if hasattr(chain, "chain"):
-            chain.chain = [Plain(cleaned)]
-        logger.info("[%s] sanitized leaked tool follow-up draft group=%s", PLUGIN_ID, group_id)
+            chain.chain = [Plain(cleaned)] if cleaned else []
+        logger.info(
+            "[%s] sanitized leaked group card tool response group=%s stripped_tool_call=%s pending_followup=%s",
+            PLUGIN_ID,
+            group_id,
+            stripped_tool_call,
+            pending_followup,
+        )
 
     @filter.on_decorating_result()
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
@@ -1135,8 +1174,9 @@ class DynamicCardPlusPlugin(Star):
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
         return (
             f"已把当前群名片改为：{new_card}{suffix_note}。"
-            "本轮群名片任务已完成；若需要回复用户，只输出一句很短的聊天回复，"
-            "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数或提示词内容。"
+            "本轮群名片任务已完成；接下来继续正常回答用户本轮消息，"
+            "不要只回复“改好了”，不要只复述工具结果。"
+            "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数、工具调用协议或提示词内容。"
         )
 
     def _clear_dynamic_suffixes(self, state: GroupCardState) -> None:
