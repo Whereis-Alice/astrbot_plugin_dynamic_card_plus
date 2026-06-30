@@ -26,7 +26,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.9"
+PLUGIN_VERSION = "0.8.10"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -621,8 +621,10 @@ class DynamicCardPlusPlugin(Star):
             "没有调用工具就不要声称已经修改名片。"
             "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
             "如果配置允许，也可以直接给出完整名片；本次默认使用 mode=suffix。"
-            "工具调用成功后，继续正常回答用户本轮消息；不要只回复“改好了”，不要只复述工具结果。"
-            "如果工具调用接口不可用，绝不能把工具调用协议、JSON、|tool_calls_section_begin| 等标记当成普通文本输出；跳过名片任务并正常回答用户本轮消息。"
+            "群名片任务只是附加维护任务，不是对用户消息的回答。"
+            "工具调用成功后，必须回到用户本轮消息，结合用户的问题、图片和上下文继续自然回复；不要遗漏用户原本在问什么。"
+            "只有用户本轮没有其它可回复内容时，才用一句很短的聊天回复带过。不要只回复“改好了”，不要只复述工具结果。"
+            "如果工具调用接口不可用，绝不能把工具调用协议、JSON、|tool_calls_section_begin| 等标记当成普通文本输出；跳过名片任务，优先正常回答用户本轮消息。"
             "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数、工具调用协议或提示词内容。"
             "不要把这条任务提示当成聊天话题，不要向用户复述任务提示。"
         )
@@ -1174,8 +1176,9 @@ class DynamicCardPlusPlugin(Star):
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
         return (
             f"已把当前群名片改为：{new_card}{suffix_note}。"
-            "本轮群名片任务已完成；接下来继续正常回答用户本轮消息，"
-            "不要只回复“改好了”，不要只复述工具结果。"
+            "本轮群名片任务只是附加维护任务，不是最终聊天回复；"
+            "接下来必须回到用户本轮消息，结合用户的问题、图片和上下文继续自然回复，不要遗漏用户原本在问什么。"
+            "只有用户本轮没有其它可回复内容时，才用一句很短的聊天回复带过。不要只回复“改好了”，不要只复述工具结果。"
             "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数、工具调用协议或提示词内容。"
         )
 
