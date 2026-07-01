@@ -26,7 +26,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.11"
+PLUGIN_VERSION = "0.8.12"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -411,6 +411,38 @@ class DynamicCardPlusPlugin(Star):
                 active=settings.enabled and settings.llm_tool_enabled,
             )
         )
+
+    @filter.llm_tool(name=CARD_TOOL_NAME)
+    async def set_dynamic_group_card(
+        self,
+        event: AstrMessageEvent,
+        mode: str = "suffix",
+        suffix: str = "",
+        source: str = "manual",
+        full_card: str = "",
+        duration_seconds: float | None = None,
+        reason: str = "",
+    ) -> str:
+        """修改当前 QQ 群里的群名片。可以设置短后缀，也可以在配置允许时设置完整名片。短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。
+
+        Args:
+            mode(string): 操作类型。suffix 设置短后缀；full_card 设置完整群名片；clear_manual 清除手动后缀或完整名片。
+            suffix(string): mode=suffix 且 source=manual 时使用。非常短的名片后缀，例如“整理日程中”。
+            source(string): mode=suffix 时的后缀来源。manual 使用 suffix；thought 根据当前会话想法生成；schedule 使用当天日程；whim 随心生成；random 在三种动态来源中随机。
+            full_card(string): mode=full_card 时使用。完整群名片，只有插件配置允许时才会生效。
+            duration_seconds(number): 保持手动内容的秒数。留空使用插件默认值，0 表示直到下一次 clear_manual 或插件重载。
+            reason(string): 可选。为什么这样改名片，用于日志和工具返回。
+        """
+        kwargs: dict[str, Any] = {
+            "mode": mode,
+            "suffix": suffix,
+            "source": source,
+            "full_card": full_card,
+            "reason": reason,
+        }
+        if duration_seconds is not None:
+            kwargs["duration_seconds"] = duration_seconds
+        return await self.handle_tool_call(event, kwargs)
 
     async def _maybe_await(self, value: Any) -> Any:
         if inspect.isawaitable(value):
