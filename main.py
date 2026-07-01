@@ -26,7 +26,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.10"
+PLUGIN_VERSION = "0.8.11"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -843,7 +843,7 @@ class DynamicCardPlusPlugin(Star):
             ),
         )
 
-    @filter.on_llm_request()
+    @filter.on_llm_request(desc="到点后向本轮 LLM 请求注入群名片工具调用提醒")
     async def inject_group_card_tool_hint(
         self,
         event: AstrMessageEvent,
@@ -979,7 +979,7 @@ class DynamicCardPlusPlugin(Star):
             suffix = f",...(+{hidden_count} more)"
         return ",".join(visible) + suffix
 
-    @filter.on_llm_response()
+    @filter.on_llm_response(desc="清理模型误输出的群名片工具协议和草稿内容")
     async def sanitize_group_card_tool_followup(
         self,
         event: AstrMessageEvent,
@@ -1020,7 +1020,7 @@ class DynamicCardPlusPlugin(Star):
             pending_followup,
         )
 
-    @filter.on_decorating_result()
+    @filter.on_decorating_result(desc="自动模式下在发送回复前刷新 QQ 群名片")
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
         settings = self._settings()
         if not settings.enabled:
