@@ -100,7 +100,7 @@ tool_reminder_mode.card_template
 {bot_name} {manual_suffix}
 ```
 
-这个模式下，提醒后 bot 自己调用工具、或者你用自然语言叫 bot 改群名片，默认都会把工具生成的短后缀放进 `{manual_suffix}`，再用 `tool_reminder_mode.card_template` 渲染完整名片。`source=random` 会在 `thought`、`schedule`、`whim` 中随机选择一种来源生成本次后缀。
+这个模式下，提醒后 bot 自己调用工具、或者你用自然语言叫 bot 改群名片，默认都会把工具生成的短后缀放进 `{manual_suffix}`，再用 `tool_reminder_mode.card_template` 渲染完整名片。`tool_reminder_mode.reminder_sources` 可多选；提醒时会从已选来源里随机建议一个具体 `source`，例如只选 `thought` 和 `whim` 就是二选一随机。
 
 如果想保留系统指标，也建议明确写在模板里：
 
@@ -115,7 +115,8 @@ tool_reminder_mode.card_template
 - `thought`：当前会话想法摘要。
 - `schedule`：当天日程。
 - `whim`：随心后缀。
-- `random`：三种来源随机。
+
+`tool_reminder_mode.reminder_sources` 留空时按三项全选处理。旧配置里的 `reminder_source=random` 仍兼容，会等价为三项全选。
 
 `llm_request` 到点后只使用强制工具调用提示，不再提供可选的 suggest 模式。工具说明只是 `set_dynamic_group_card` 的能力说明；真正到点时，插件会额外注入本轮任务提示，要求 bot 下一条 assistant 行为必须调用 `set_dynamic_group_card`，工具调用前禁止输出自然语言，不要复述系统提示，也不要在没有工具调用时声称已经修改。
 

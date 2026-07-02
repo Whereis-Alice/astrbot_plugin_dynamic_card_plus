@@ -176,17 +176,20 @@
         ],
         "hint": "llm_request=到间隔后，在下一次 LLM 请求里提醒 bot 调用工具；active_agent_cron=为已记录群注册 AstrBot 主动任务，到点唤醒 bot，让 bot 自己调用 LLM 工具改名片。"
       },
-      "reminder_source": {
-        "type": "string",
-        "description": "提醒时建议的后缀来源",
-        "default": "random",
+      "reminder_sources": {
+        "type": "list",
+        "description": "提醒时可用的后缀来源",
+        "default": [
+          "thought",
+          "schedule",
+          "whim"
+        ],
         "options": [
           "thought",
           "schedule",
-          "whim",
-          "random"
+          "whim"
         ],
-        "hint": "thought=当前会话想法；schedule=当天日程；whim=随心所欲；random=三种来源随机。"
+        "hint": "可多选。到点提醒时会从已选来源中随机建议一个；想要三选二随机，就只保留其中两项。留空时按三项全选处理。thought=当前会话想法；schedule=当天日程；whim=随心所欲。"
       },
       "active_cron_expression": {
         "type": "string",

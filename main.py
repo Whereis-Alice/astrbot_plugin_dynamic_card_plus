@@ -26,13 +26,14 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.12"
+PLUGIN_VERSION = "0.8.13"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
 UPSTREAM_REPO = "https://github.com/zgojin/astrbot_plugin_botName"
 CARD_TOOL_NAME = "set_dynamic_group_card"
 CARD_HINT_MARKER = "[DynamicCardPlus]"
+REMINDER_DYNAMIC_SOURCES = ("thought", "schedule", "whim")
 DEFAULT_TOOL_DESCRIPTION = (
     "修改当前 QQ 群里的群名片。"
     "可以设置一个短后缀表达此刻想法、心情、日程状态，"
@@ -102,6 +103,23 @@ def _read_list(value: Any, default: list[str] | None = None) -> list[str]:
         ]
         return [item for item in items if item]
     return fallback
+
+
+def _read_reminder_sources(value: Any, legacy_source: Any = "random") -> tuple[str, ...]:
+    selected: list[str] = []
+    for item in _read_list(value, []):
+        source = _clean_text(item).lower()
+        if source == "random":
+            return REMINDER_DYNAMIC_SOURCES
+        if source in REMINDER_DYNAMIC_SOURCES and source not in selected:
+            selected.append(source)
+    if selected:
+        return tuple(selected)
+
+    source = _clean_text(legacy_source, "random").lower()
+    if source in REMINDER_DYNAMIC_SOURCES:
+        return (source,)
+    return REMINDER_DYNAMIC_SOURCES
 
 
 def _normalize_id(value: Any) -> str:
@@ -243,7 +261,7 @@ class PluginSettings:
     tool_reminder_card_template: str
     tool_reminder_inject_hint: bool
     tool_reminder_trigger_mode: str
-    tool_reminder_source: str
+    tool_reminder_sources: tuple[str, ...]
     tool_reminder_active_cron_expression: str
 
     thought_refresh_seconds: int
@@ -615,8 +633,12 @@ class DynamicCardPlusPlugin(Star):
             return f"0 */{hours} * * *"
         return "*/30 * * * *"
 
+    def _pick_tool_reminder_source(self, settings: PluginSettings) -> str:
+        sources = settings.tool_reminder_sources or REMINDER_DYNAMIC_SOURCES
+        return random.choice(list(sources))
+
     def _active_cron_note(self, settings: PluginSettings) -> str:
-        source = settings.tool_reminder_source
+        source = self._pick_tool_reminder_source(settings)
         return self._required_group_card_tool_prompt(
             current_card="",
             source=source,
@@ -703,6 +725,10 @@ class DynamicCardPlusPlugin(Star):
         )
         if reminder_source not in {"thought", "schedule", "whim", "random"}:
             reminder_source = "random"
+        reminder_sources = _read_reminder_sources(
+            reminder_mode.get("reminder_sources", tool.get("reminder_sources")),
+            reminder_source,
+        )
 
         reminder_trigger_mode = _clean_text(reminder_mode.get("trigger_mode"), "llm_request")
         if reminder_trigger_mode not in {"llm_request", "active_agent_cron"}:
@@ -800,7 +826,7 @@ class DynamicCardPlusPlugin(Star):
                 True,
             ),
             tool_reminder_trigger_mode=reminder_trigger_mode,
-            tool_reminder_source=reminder_source,
+            tool_reminder_sources=reminder_sources,
             tool_reminder_active_cron_expression=_clean_text(reminder_mode.get("active_cron_expression")),
             thought_refresh_seconds=_read_int(
                 thought.get("refresh_seconds"),
@@ -1385,9 +1411,7 @@ class DynamicCardPlusPlugin(Star):
         now: float,
     ) -> tuple[str, str, str]:
         del event, state, now
-        source = settings.tool_reminder_source
-        if source == "random":
-            source = random.choice(["thought", "schedule", "whim"])
+        source = self._pick_tool_reminder_source(settings)
 
         if source == "thought":
             return (
