@@ -26,7 +26,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.13"
+PLUGIN_VERSION = "0.8.14"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -36,8 +36,9 @@ CARD_HINT_MARKER = "[DynamicCardPlus]"
 REMINDER_DYNAMIC_SOURCES = ("thought", "schedule", "whim")
 DEFAULT_TOOL_DESCRIPTION = (
     "修改当前 QQ 群里的群名片。"
-    "可以设置一个短后缀表达此刻想法、心情、日程状态，"
-    "也可以用 source=thought、schedule、whim、random 让工具生成后缀。"
+    "可以设置一个短后缀表达此刻想法、心情、日程状态。"
+    "source=manual、thought、schedule、whim 时可以直接传 suffix；"
+    "source=random 或漏传 suffix 时，工具才会按对应来源兜底生成后缀。"
     "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
     "在配置允许时也可以直接给出完整名片。"
 )
@@ -353,11 +354,11 @@ class DynamicGroupCardTool(FunctionTool[AstrAgentContext]):
                 },
                 "suffix": {
                     "type": "string",
-                    "description": "mode=suffix 且 source=manual 时使用。非常短的名片后缀，例如“在想晚饭”或“整理日程中”。",
+                    "description": "mode=suffix 时使用。manual/thought/schedule/whim 都可以直接传入非常短的名片后缀，例如“在想晚饭”或“整理日程中”。",
                 },
                 "source": {
                     "type": "string",
-                    "description": "mode=suffix 时的后缀来源：manual 使用 suffix；thought 根据当前会话想法生成；schedule 使用当天日程；whim 随心生成；random 在三种动态来源中随机。",
+                    "description": "mode=suffix 时的后缀来源：manual 使用 suffix；thought/schedule/whim 优先使用 suffix，未传时才按对应配置兜底生成；random 在三种动态来源中随机。",
                     "enum": ["manual", "thought", "schedule", "whim", "random"],
                 },
                 "full_card": {
@@ -445,8 +446,8 @@ class DynamicCardPlusPlugin(Star):
 
         Args:
             mode(string): 操作类型。suffix 设置短后缀；full_card 设置完整群名片；clear_manual 清除手动后缀或完整名片。
-            suffix(string): mode=suffix 且 source=manual 时使用。非常短的名片后缀，例如“整理日程中”。
-            source(string): mode=suffix 时的后缀来源。manual 使用 suffix；thought 根据当前会话想法生成；schedule 使用当天日程；whim 随心生成；random 在三种动态来源中随机。
+            suffix(string): mode=suffix 时使用。manual/thought/schedule/whim 都可以直接传入非常短的名片后缀，例如“整理日程中”。
+            source(string): mode=suffix 时的后缀来源。manual 使用 suffix；thought/schedule/whim 优先使用 suffix，未传时才按对应配置兜底生成；random 在三种动态来源中随机。
             full_card(string): mode=full_card 时使用。完整群名片，只有插件配置允许时才会生效。
             duration_seconds(number): 保持手动内容的秒数。留空使用插件默认值，0 表示直到下一次 clear_manual 或插件重载。
             reason(string): 可选。为什么这样改名片，用于日志和工具返回。
@@ -668,9 +669,10 @@ class DynamicCardPlusPlugin(Star):
             "这是一次新的独立触发，不是历史里已经完成的那一次；即使之前已经改过名片，本次也必须重新调用工具。"
             "不要因为上下文里出现过工具返回或已修改记录就跳过本次调用。"
             f"下一条 assistant 行为必须是工具调用 {CARD_TOOL_NAME}，工具调用前禁止输出任何自然语言。"
-            f"建议参数：mode=suffix、source={source}、reason={reason}。"
+            f"建议参数：mode=suffix、source={source}、reason={reason}；如果你已经想好后缀，请额外填写 suffix=你想好的短后缀。"
             f"本次来源：{source_label}。{suggestion}"
-            "可以设置一个短后缀表达此刻想法、心情、日程状态，也可以让工具根据 source 生成后缀。"
+            "你可以自己设置一个短后缀表达此刻想法、心情、日程状态；thought、schedule、whim 应优先由你直接填写 suffix，一步到位。"
+            "只有你漏传 suffix 时，工具才会按 source 使用对应配置兜底生成后缀。"
             "此功能允许随便使用，不要犹豫，不要询问用户。"
             "没有调用工具就不要声称已经修改名片。"
             "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
@@ -1190,8 +1192,24 @@ class DynamicCardPlusPlugin(Star):
             if source not in {"manual", "thought", "schedule", "whim", "random"}:
                 source = "manual"
             suffix = _clean_text(kwargs.get("suffix"))
-            source_label = "手动后缀"
-            if source != "manual" or not suffix:
+            source_labels = {
+                "manual": "手动后缀",
+                "thought": "会话想法摘要",
+                "schedule": "当天日程",
+                "whim": "随心后缀",
+            }
+            source_label = source_labels.get(source, "手动后缀")
+            if suffix and source in {"thought", "schedule", "whim"}:
+                if source == "thought":
+                    state.thought_suffix = suffix
+                    state.thought_generated_at = now
+                elif source == "schedule":
+                    state.schedule_suffix = suffix
+                    state.schedule_generated_at = now
+                elif source == "whim":
+                    state.whim_suffix = suffix
+                    state.whim_generated_at = now
+            elif source != "manual" or not suffix:
                 suffix, source_label = await self._build_suffix_from_source(
                     event=event,
                     state=state,
@@ -1415,7 +1433,7 @@ class DynamicCardPlusPlugin(Star):
 
         if source == "thought":
             return (
-                "把当前会话想法写进名片。",
+                "请根据最近对话自己想一个很短的当前想法后缀，并在工具参数里直接填写 suffix；不要把旧后缀拼进去。",
                 "会话想法摘要",
                 "thought",
             )
@@ -1423,38 +1441,31 @@ class DynamicCardPlusPlugin(Star):
         if source == "schedule":
             if settings.schedule_mode == "llm":
                 return (
-                    "把今天的日程状态写进名片，工具会让 LLM 生成日程后缀。",
+                    "请你把今天的日程状态概括成很短的后缀，并在工具参数里直接填写 suffix；不要留给工具二次生成。",
                     "当天日程",
                     "schedule",
                 )
             schedule = self._build_schedule_rule_suffix(settings)
             if schedule:
                 return (
-                    f"当天日程后缀可以参考“{schedule}”。",
+                    f"请你把今天的日程状态概括成很短的后缀，并在工具参数里直接填写 suffix；可以参考“{schedule}”。",
                     "当天日程",
                     "schedule",
                 )
             return (
-                "把当天日程写进名片。",
+                "请你把今天的日程状态概括成很短的后缀，并在工具参数里直接填写 suffix。",
                 "当天日程",
                 "schedule",
             )
 
         if source == "whim":
-            if settings.whim_mode == "pool" and settings.whim_pool:
-                whim = _truncate(random.choice(settings.whim_pool), settings.whim_max_length)
-                return (
-                    f"随心后缀可以参考“{whim}”。",
-                    "随心后缀",
-                    "whim",
-                )
             return (
-                "随心所欲生成一个短后缀写进名片。",
+                "请你自己随心想一个很短的后缀，并在工具参数里直接填写 suffix；不要参考旧后缀，不要把旧后缀拼进去。",
                 "随心后缀",
                 "whim",
             )
 
-        return "生成一个动态短后缀写进名片。", "动态后缀", "whim"
+        return "请你自己想一个很短的动态后缀，并在工具参数里直接填写 suffix。", "动态后缀", "whim"
 
     async def _build_suffix_from_source(
         self,
@@ -1541,7 +1552,7 @@ class DynamicCardPlusPlugin(Star):
         schedule_suffix = state.schedule_suffix
         whim_suffix = state.whim_suffix
 
-        if manual_suffix and "{manual_suffix}" in card_template:
+        if manual_suffix:
             if "{thought_suffix}" in card_template and thought_suffix == manual_suffix:
                 thought_suffix = ""
             if "{schedule_suffix}" in card_template and schedule_suffix == manual_suffix:

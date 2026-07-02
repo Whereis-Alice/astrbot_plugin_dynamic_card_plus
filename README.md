@@ -47,9 +47,9 @@ pip install -r requirements.txt
 - `card_fields`：两个模式共用的基础名片字段和系统指标文本。
 - `auto_update_mode`：自动改名片模式专属配置和完整名片模板。
 - `tool_reminder_mode`：提醒 bot 主动用工具模式专属配置和完整名片模板。
-- `thought_summary`：会话想法摘要来源。
-- `daily_schedule`：当天日程来源。
-- `whim_suffix`：随心后缀来源。
+- `thought_summary`：会话想法摘要来源/兜底。
+- `daily_schedule`：当天日程来源/兜底。
+- `whim_suffix`：随心后缀来源/兜底。
 - `llm`：用于生成动态后缀的模型设置。
 - `llm_tool`：LLM 工具通用设置。
 
@@ -100,7 +100,7 @@ tool_reminder_mode.card_template
 {bot_name} {manual_suffix}
 ```
 
-这个模式下，提醒后 bot 自己调用工具、或者你用自然语言叫 bot 改群名片，默认都会把工具生成的短后缀放进 `{manual_suffix}`，再用 `tool_reminder_mode.card_template` 渲染完整名片。`tool_reminder_mode.reminder_sources` 可多选；提醒时会从已选来源里随机建议一个具体 `source`，例如只选 `thought` 和 `whim` 就是二选一随机。
+这个模式下，提醒后 bot 自己调用工具、或者你用自然语言叫 bot 改群名片，默认都会把 bot 传入或工具兜底得到的短后缀放进 `{manual_suffix}`，再用 `tool_reminder_mode.card_template` 渲染完整名片。`tool_reminder_mode.reminder_sources` 可多选；提醒时会从已选来源里随机建议一个具体 `source`，例如只选 `thought` 和 `whim` 就是二选一随机。
 
 如果想保留系统指标，也建议明确写在模板里：
 
@@ -112,13 +112,13 @@ tool_reminder_mode.card_template
 
 提醒建议来源：
 
-- `thought`：当前会话想法摘要。
-- `schedule`：当天日程。
-- `whim`：随心后缀。
+- `thought`：bot 根据最近对话自己想一个当前想法后缀，并直接传 `suffix`。
+- `schedule`：bot 把今天的日程状态概括成短后缀，并直接传 `suffix`。
+- `whim`：bot 随心所欲想一个短后缀，并直接传 `suffix`。
 
 `tool_reminder_mode.reminder_sources` 留空时按三项全选处理。旧配置里的 `reminder_source=random` 仍兼容，会等价为三项全选。
 
-`llm_request` 到点后只使用强制工具调用提示，不再提供可选的 suggest 模式。工具说明只是 `set_dynamic_group_card` 的能力说明；真正到点时，插件会额外注入本轮任务提示，要求 bot 下一条 assistant 行为必须调用 `set_dynamic_group_card`，工具调用前禁止输出自然语言，不要复述系统提示，也不要在没有工具调用时声称已经修改。
+`llm_request` 到点后只使用强制工具调用提示，不再提供可选的 suggest 模式。工具说明只是 `set_dynamic_group_card` 的能力说明；真正到点时，插件会额外注入本轮任务提示，要求 bot 下一条 assistant 行为必须调用 `set_dynamic_group_card`，工具调用前禁止输出自然语言，并优先由 bot 在同一次工具调用里直接填写 `suffix`。只有漏传 `suffix` 时，工具才会按 `source` 使用对应配置兜底生成后缀。
 
 `active_agent_cron` 会通过 AstrBot 主动任务唤醒 bot，并在任务 note 里要求她调用 `set_dynamic_group_card`；真正改名片仍由 LLM 工具完成。
 
@@ -210,10 +210,10 @@ set_dynamic_group_card
 - `mode=full_card`：设置完整群名片，需要开启 `llm_tool.allow_full_card`。
 - `mode=clear_manual`：清除 LLM 工具设置的手动内容。
 - `source=manual`：使用传入的 `suffix`。
-- `source=thought`：根据当前会话生成想法后缀。
-- `source=schedule`：使用当天日程。
-- `source=whim`：生成随心后缀。
-- `source=random`：在 `thought`、`schedule`、`whim` 中随机。
+- `source=thought`：优先使用 bot 根据当前会话直接传入的 `suffix`；未传时才按 `thought_summary` 配置兜底生成。
+- `source=schedule`：优先使用 bot 根据当天日程状态直接传入的 `suffix`；未传时才按 `daily_schedule` 配置兜底生成。
+- `source=whim`：优先使用 bot 随心所欲直接传入的 `suffix`；未传时才按 `whim_suffix` 配置兜底生成。
+- `source=random`：不传 `suffix` 时在 `thought`、`schedule`、`whim` 中随机兜底生成。
 
 `mode=suffix` 会按当前运行模式的完整名片模板渲染最终名片：`auto_update` 使用 `auto_update_mode.card_template`，`tool_reminder` 使用 `tool_reminder_mode.card_template`。`tool_reminder` 模式中，第二次 `mode=suffix` 会替换上一次工具/动态后缀状态，不会叠加旧后缀。
 
@@ -225,7 +225,7 @@ set_dynamic_group_card
 
 ### thought_summary
 
-根据当前会话最近消息生成一个短后缀。自动模式中需要开启 `auto_update_mode.include_thought_summary`；工具模式中可以通过 `source=thought` 使用。
+根据当前会话最近消息生成一个短后缀。自动模式中需要开启 `auto_update_mode.include_thought_summary`；工具模式中，提醒会优先要求 bot 自己根据最近对话直接传 `suffix`，这里只作为漏传时的兜底。
 
 ### daily_schedule
 
@@ -233,6 +233,8 @@ set_dynamic_group_card
 
 - `rules`：按 `schedule_lines` 规则匹配当天日程。
 - `llm`：让 bot/LLM 生成当天日程后缀，失败时回落到规则和兜底文本。
+
+工具提醒模式中，日程提醒会优先要求 bot 自己概括当天状态并直接传 `suffix`；这里的规则和 LLM 生成主要用于自动模式和漏传 `suffix` 时兜底。
 
 默认规则包含一周七天：
 
@@ -264,6 +266,8 @@ daily=自由活动
 
 - `mode=pool`：从候选池随机选择。
 - `mode=llm`：让模型生成，失败时回退到候选池。
+
+工具提醒模式中，随心提醒会优先要求 bot 自己随意传 `suffix`；这里主要用于自动模式和漏传 `suffix` 时兜底。
 
 ## 更新记录
 

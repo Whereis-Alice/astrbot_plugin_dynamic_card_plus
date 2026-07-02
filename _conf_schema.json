@@ -189,7 +189,7 @@
           "schedule",
           "whim"
         ],
-        "hint": "可多选。到点提醒时会从已选来源中随机建议一个；想要三选二随机，就只保留其中两项。留空时按三项全选处理。thought=当前会话想法；schedule=当天日程；whim=随心所欲。"
+        "hint": "可多选。到点提醒时会从已选来源中随机建议一个；想要三选二随机，就只保留其中两项。留空时按三项全选处理。提醒会要求 bot 直接填写 suffix；漏传时才按对应动态来源兜底。thought=当前会话想法；schedule=当天日程；whim=随心所欲。"
       },
       "active_cron_expression": {
         "type": "string",
@@ -201,7 +201,7 @@
   },
   "thought_summary": {
     "type": "object",
-    "description": "动态来源：当前会话想法摘要",
+    "description": "动态来源/兜底：当前会话想法摘要",
     "items": {
       "refresh_seconds": {
         "type": "int",
@@ -217,7 +217,7 @@
       },
       "prompt": {
         "type": "text",
-        "description": "想法摘要生成提示词",
+        "description": "想法摘要兜底生成提示词",
         "default": "请根据最近对话，为自己生成一个适合作为 QQ 群名片后缀的当前想法。只输出后缀本身，不要解释，不要加引号。"
       },
       "max_length": {
@@ -245,7 +245,7 @@
   },
   "daily_schedule": {
     "type": "object",
-    "description": "动态来源：当天日程",
+    "description": "动态来源/兜底：当天日程",
     "items": {
       "mode": {
         "type": "string",
@@ -255,7 +255,7 @@
           "rules",
           "llm"
         ],
-        "hint": "rules=按下面的一周/日期规则匹配；llm=让 bot/LLM 生成当天日程后缀，失败时回落到规则和兜底文本。"
+        "hint": "rules=按下面的一周/日期规则匹配；llm=让 bot/LLM 生成当天日程后缀，失败时回落到规则和兜底文本。tool_reminder 提醒会优先要求 bot 直接填写 suffix，漏传时才用这里兜底。"
       },
       "refresh_seconds": {
         "type": "int",
@@ -271,7 +271,7 @@
       },
       "prompt": {
         "type": "text",
-        "description": "LLM 日程生成提示词",
+        "description": "LLM 日程兜底生成提示词",
         "default": "请为自己生成一个适合作为今天 QQ 群名片后缀的日程状态。只输出后缀本身，不要解释，不要加引号，尽量短。",
         "hint": "仅 mode=llm 时优先使用。可用变量：{date}、{time}、{weekday}。"
       },
@@ -308,7 +308,7 @@
   },
   "whim_suffix": {
     "type": "object",
-    "description": "动态来源：随心后缀",
+    "description": "动态来源/兜底：随心后缀",
     "items": {
       "refresh_seconds": {
         "type": "int",
@@ -324,13 +324,13 @@
       },
       "mode": {
         "type": "string",
-        "description": "随心后缀来源",
+        "description": "随心后缀兜底来源",
         "default": "pool",
         "options": [
           "pool",
           "llm"
         ],
-        "hint": "pool 从候选池随机选；llm 调用模型生成，失败时回退到候选池。"
+        "hint": "tool_reminder 提醒会优先要求 bot 直接填写 suffix；这里主要用于自动模式和漏传 suffix 时兜底。pool 从候选池随机选；llm 调用模型生成，失败时回退到候选池。"
       },
       "pool": {
         "type": "list",
@@ -347,7 +347,7 @@
       },
       "prompt": {
         "type": "text",
-        "description": "LLM 随心后缀生成提示词",
+        "description": "LLM 随心后缀兜底生成提示词",
         "default": "请随心所欲地生成一个适合作为自己 QQ 群名片后缀的短句。只输出后缀本身，不要解释，不要加引号，长度很短。"
       },
       "max_length": {
@@ -384,7 +384,7 @@
       "description": {
         "type": "text",
         "description": "工具说明",
-        "default": "修改当前 QQ 群里的群名片。可以设置一个短后缀表达此刻想法、心情、日程状态，也可以用 source=thought、schedule、whim、random 让工具生成后缀。短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。在配置允许时也可以直接给出完整名片。",
+        "default": "修改当前 QQ 群里的群名片。可以设置一个短后缀表达此刻想法、心情、日程状态。source=manual、thought、schedule、whim 时可以直接传 suffix；source=random 或漏传 suffix 时，工具才会按对应来源兜底生成后缀。短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。在配置允许时也可以直接给出完整名片。",
         "hint": "这段说明会给 LLM 看，用来决定什么时候调用 set_dynamic_group_card。"
       },
       "min_interval_seconds": {
