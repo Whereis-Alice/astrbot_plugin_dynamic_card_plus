@@ -132,7 +132,9 @@ tool_reminder_mode.card_template
 
 AstrBot 启动 Agent 时会把这段临时提醒复制到 `run_context.messages`。插件在 `set_dynamic_group_card` 真正开始调用前，会同时从原请求和当前 Agent 上下文中只移除带 `[DynamicCardPlus]` 标记的提醒块，保留用户原消息和其他插件注入的内容。
 
-为减少提醒触发时把大量工具 schema 一起交给模型造成的首轮等待，插件只会对这一个请求临时使用仅包含 `set_dynamic_group_card` 的工具集，强制动作完成或 Agent 退出后恢复原始工具集。后续自然回复仍保留歌曲、图片以及其它全部 LLM 工具；这不会停用全局工具，也不会影响普通聊天。
+为减少提醒触发时把大量工具 schema 一起交给模型造成的首轮等待，插件只会对这一个请求的首轮临时使用仅包含 `set_dynamic_group_card` 的工具集。名片工具成功后，后续自然回复仍保留全部原始工具和原始 handler，但会暂时使用精简后的参数 schema：保留工具名、必要参数类型和参数结构，移除冗长描述、示例、默认值以及兼容代理不接受的非字符串 `enum` 标注。这样不会停用歌曲、图片或其它工具，也不会影响普通聊天；Agent 结束后才恢复原始完整工具集。
+
+触发改名片时会比普通聊天多一次模型请求：首轮决定调用 `set_dynamic_group_card`，工具执行后还要再请求一次模型，结合工具结果回复用户。因此“改名片接口成功后到最终回复”的耗时，通常对应后续模型请求或 Provider 重试，不是 QQ 改名片接口本身。提醒模式漏传 `suffix` 时，插件只使用配置的规则/候选池兜底，不会在工具内部再嵌套发起一次 LLM 请求。
 
 如果 AstrBot 全局 `provider_settings.tool_schema_mode` 使用 `skills_like`，插件会跳过这项门控以避免影响该模式的工具执行链；日志中的 `gated=false` 可据此判断。
 
@@ -141,7 +143,9 @@ AstrBot 启动 Agent 时会把这段临时提醒复制到 `run_context.messages`
 - `bound reminder to agent` 的 `inject_to_agent_begin_seconds`：提醒注入到 Agent 真正开始。
 - `injected tool reminder` 中的 `initial_tool_count` 和 `gated`：首轮强制动作是否启用了请求级单工具门控；`tool_count` 是原始完整工具数量。
 - `reminder reached tool` 的 `wait_seconds`：提醒注入到模型返回工具调用；这里很长且同时出现 `Request timed out` 时，主要是在等待 Chat Provider 或其重试。
-- `restored reminder follow-up tools`：名片工具完成后恢复完整工具集，日志中的 `1->N` 表示首轮门控到后续回复的恢复。
+- `prepared compact reminder follow-up tools`：名片工具完成后为本轮后续回复准备可执行的精简工具集；`reminder follow-up schema` 会记录精简前后的 schema 字符数。
+- `llm response ... tool_to_response_seconds`：从名片工具成功到后续模型返回最终回复的时间；配合 `followup_schema=compact` 判断是否已经走精简工具 schema。
+- `restored reminder follow-up tools`：Agent 结束后恢复原始完整工具集。这个恢复只影响当前请求，不会停用全局工具。
 - `reminder agent finished` 的 `tool_to_agent_done_seconds`：改名工具完成后到模型生成最终聊天回复。
 - `set_group_card succeeded` 前后的时间：OneBot 修改群名片接口自身耗时。
 

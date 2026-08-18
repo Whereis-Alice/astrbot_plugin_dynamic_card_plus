@@ -10,9 +10,11 @@ from astrbot.core.agent.message import Message, TextPart
 from main import (
     CARD_HINT_MARKER,
     CARD_TOOL_NAME,
+    DynamicGroupCardTool,
     DynamicCardPlusPlugin,
     GroupCardState,
     ReminderBinding,
+    _compact_json_schema,
 )
 
 
@@ -178,6 +180,91 @@ class ReminderContextCleanupTests(unittest.TestCase):
         self.assertFalse(gated)
         self.assertEqual(initial_count, 2)
         self.assertIs(request.func_tool, original_tools)
+
+    def test_compact_followup_keeps_executable_tools_and_drops_verbose_schema(self) -> None:
+        plugin = self.make_plugin()
+
+        async def send_image(*args, **kwargs):
+            return "ok"
+
+        card_tool = FunctionTool(
+            name=CARD_TOOL_NAME,
+            description="card description " * 20,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "flag": {
+                        "type": "boolean",
+                        "description": "verbose flag",
+                        "default": False,
+                        "enum": [True, False],
+                    }
+                },
+            },
+            handler=send_image,
+        )
+        other_tool = FunctionTool(
+            name="send_image",
+            description="image description " * 20,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "verbose path",
+                        "examples": ["a.png"],
+                    }
+                },
+            },
+            handler=send_image,
+        )
+        original_tools = ToolSet(tools=[card_tool, other_tool])
+
+        compact_tools = plugin._build_compact_followup_tool_set(original_tools)
+
+        self.assertIsNotNone(compact_tools)
+        assert compact_tools is not None
+        self.assertEqual(compact_tools.names(), original_tools.names())
+        compact_card = compact_tools.get_tool(CARD_TOOL_NAME)
+        compact_other = compact_tools.get_tool("send_image")
+        self.assertIsNotNone(compact_card)
+        self.assertIsNotNone(compact_other)
+        assert compact_card is not None
+        assert compact_other is not None
+        self.assertIs(compact_card.handler, card_tool.handler)
+        self.assertIs(compact_other.handler, other_tool.handler)
+        self.assertNotIn("description", compact_card.parameters["properties"]["flag"])
+        self.assertNotIn("default", compact_card.parameters["properties"]["flag"])
+        self.assertNotIn("enum", compact_card.parameters["properties"]["flag"])
+        self.assertNotIn("examples", compact_other.parameters["properties"]["path"])
+        self.assertLess(len(compact_card.description), len(card_tool.description))
+
+    def test_compact_schema_removes_non_string_enum_values(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean", "enum": [True, False]},
+                "mode": {"type": "string", "enum": ["a", "b"]},
+            },
+        }
+
+        compact = _compact_json_schema(schema)
+
+        self.assertNotIn("enum", compact["properties"]["enabled"])
+        self.assertEqual(compact["properties"]["mode"]["enum"], ["a", "b"])
+
+    def test_compact_followup_preserves_custom_card_tool_subclass(self) -> None:
+        plugin = self.make_plugin()
+        card_tool = DynamicGroupCardTool(plugin=plugin)
+
+        compact_tools = plugin._build_compact_followup_tool_set(ToolSet(tools=[card_tool]))
+
+        self.assertIsNotNone(compact_tools)
+        assert compact_tools is not None
+        compact_card = compact_tools.get_tool(CARD_TOOL_NAME)
+        self.assertIsInstance(compact_card, DynamicGroupCardTool)
+        assert compact_card is not None
+        self.assertIs(compact_card.plugin, plugin)
 
 
 if __name__ == "__main__":

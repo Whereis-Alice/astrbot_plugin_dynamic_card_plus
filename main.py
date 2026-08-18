@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
+import json
 import random
 import re
 import time
@@ -25,7 +27,7 @@ from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.16"
+PLUGIN_VERSION = "0.8.18"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -144,6 +146,29 @@ def _render_template(template: str, values: dict[str, Any]) -> str:
 
 def _compact_spaces(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
+
+
+_COMPACT_SCHEMA_DROP_KEYS = frozenset(
+    {"description", "title", "default", "examples", "$comment"}
+)
+
+
+def _compact_json_schema(value: Any) -> Any:
+    """Keep tool argument structure while dropping verbose schema annotations."""
+    if isinstance(value, dict):
+        return {
+            key: _compact_json_schema(item)
+            for key, item in value.items()
+            if key not in _COMPACT_SCHEMA_DROP_KEYS
+            and not (
+                key == "enum"
+                and isinstance(item, list)
+                and any(not isinstance(enum_value, str) for enum_value in item)
+            )
+        }
+    if isinstance(value, list):
+        return [_compact_json_schema(item) for item in value]
+    return value
 
 
 def _first_clean_line(text: str, max_length: int) -> str:
@@ -367,6 +392,8 @@ class ReminderBinding:
     initial_tool_gate_applied: bool = False
     initial_tool_count: int = 0
     followup_tools_restored: bool = False
+    followup_tools_compacted: bool = False
+    followup_tool_set: Any = None
     run_context: Any = None
     run_context_id: str = ""
     consumed: bool = False
@@ -374,6 +401,7 @@ class ReminderBinding:
     run_context_hint_removed: int = 0
     tool_called_at: float = 0.0
     tool_completed_at: float = 0.0
+    followup_schema_chars: int = 0
 
 
 @pydantic_dataclass
@@ -1049,6 +1077,63 @@ class DynamicCardPlusPlugin(Star):
             return None
         return ToolSet(tools=[card_tool])
 
+    def _build_compact_followup_tool_set(self, tool_set: Any) -> ToolSet | None:
+        """Keep every executable tool while reducing the follow-up schema size.
+
+        The runner uses request-local tool objects for both schema generation and
+        execution. Shallow-copying each tool preserves its handler/subclass
+        implementation while allowing this request to omit verbose annotations.
+        The original full set remains owned by the request binding and is restored
+        when the Agent finishes.
+        """
+        if not isinstance(tool_set, ToolSet):
+            return None
+
+        original_tools = list(getattr(tool_set, "tools", []) or [])
+        compact_tools: list[Any] = []
+        try:
+            for tool in original_tools:
+                compact_tool = copy.copy(tool)
+                description = _compact_spaces(
+                    _clean_text(getattr(tool, "description", ""))
+                )
+                compact_tool.description = _truncate(description, 240)
+                parameters = getattr(tool, "parameters", None)
+                if parameters is not None:
+                    compact_tool.parameters = _compact_json_schema(parameters)
+                compact_tools.append(compact_tool)
+        except Exception as exc:
+            logger.warning(
+                "[%s] compact follow-up tool schema unavailable: %r",
+                PLUGIN_ID,
+                exc,
+            )
+            return None
+
+        if len(compact_tools) != len(original_tools):
+            return None
+        try:
+            compact_set = ToolSet(tools=compact_tools)
+        except Exception as exc:
+            logger.warning(
+                "[%s] compact follow-up tool set validation failed: %r",
+                PLUGIN_ID,
+                exc,
+            )
+            return None
+        if compact_set.names() != tool_set.names():
+            return None
+        return compact_set
+
+    def _tool_schema_chars(self, tool_set: Any) -> int:
+        if not isinstance(tool_set, ToolSet):
+            return 0
+        try:
+            schema = tool_set.get_func_desc_openai_style()
+            return len(json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
+        except Exception:
+            return 0
+
     def _gate_initial_reminder_tools(
         self,
         req: ProviderRequest,
@@ -1106,6 +1191,55 @@ class DynamicCardPlusPlugin(Star):
             before,
             after,
         )
+
+    def _prepare_compact_followup_tools(
+        self,
+        binding: ReminderBinding,
+        reason: str,
+    ) -> None:
+        """Use compact executable schemas until this request's Agent completes."""
+        if (
+            not binding.initial_tool_gate_applied
+            or binding.followup_tools_restored
+            or binding.followup_tools_compacted
+            or binding.original_func_tool is None
+        ):
+            return
+
+        compact_set = self._build_compact_followup_tool_set(binding.original_func_tool)
+        if compact_set is None:
+            self._restore_reminder_tools(binding, f"{reason}_fallback_full")
+            return
+
+        current_tool_set = getattr(binding.request, "func_tool", None)
+        original_schema_chars = self._tool_schema_chars(binding.original_func_tool)
+        binding.request.func_tool = compact_set
+        binding.followup_tool_set = compact_set
+        binding.followup_tools_compacted = True
+        binding.followup_schema_chars = self._tool_schema_chars(compact_set)
+        before = len(
+            self._request_tool_names(SimpleNamespace(func_tool=current_tool_set))
+        )
+        after = len(self._request_tool_names(SimpleNamespace(func_tool=compact_set)))
+        logger.info(
+            "[%s] prepared compact reminder follow-up tools group=%s trigger=%s "
+            "reason=%s tool_count=%s->%s schema=compact_executable",
+            PLUGIN_ID,
+            binding.group_id,
+            binding.trigger_id,
+            reason,
+            before,
+            after,
+        )
+        if binding.followup_schema_chars:
+            logger.info(
+                "[%s] reminder follow-up schema group=%s trigger=%s chars=%s original_chars=%s",
+                PLUGIN_ID,
+                binding.group_id,
+                binding.trigger_id,
+                binding.followup_schema_chars,
+                original_schema_chars,
+            )
 
     def _append_provider_hint(self, req: ProviderRequest, hint: str) -> TextPart | None:
         return self._append_temp_user_hint(req, hint)
@@ -1510,7 +1644,38 @@ class DynamicCardPlusPlugin(Star):
         state = self._states[_normalize_id(group_id)]
         original = _clean_text(getattr(response, "completion_text", ""))
         cleaned, stripped_tool_call = _strip_leaked_tool_call_blocks(original)
-        pending_followup = time.time() <= state.pending_tool_followup_until
+        now = time.time()
+        pending_followup = now <= state.pending_tool_followup_until
+        reminder_binding = self._find_reminder_binding(event) if pending_followup else None
+
+        if settings.debug_log:
+            tool_names = [
+                _clean_text(name)
+                for name in (getattr(response, "tools_call_name", None) or [])
+                if _clean_text(name)
+            ]
+            logger.info(
+                "[%s] llm response group=%s phase=%s role=%s tool_count=%s "
+                "completion_chars=%s reasoning_chars=%s pending_followup=%s "
+                "tool_to_response_seconds=%.3f followup_schema=%s context_messages=%s",
+                PLUGIN_ID,
+                group_id,
+                "tool_call" if tool_names else "assistant",
+                _clean_text(getattr(response, "role", ""), "-"),
+                len(tool_names),
+                len(original),
+                len(_clean_text(getattr(response, "reasoning_content", ""))),
+                pending_followup,
+                max(0.0, now - state.last_tool_trace_completed_at)
+                if pending_followup and state.last_tool_trace_completed_at
+                else 0.0,
+                "compact"
+                if reminder_binding is not None and reminder_binding.followup_tools_compacted
+                else "full/unknown",
+                len(getattr(reminder_binding.run_context, "messages", []) or [])
+                if reminder_binding is not None
+                else 0,
+            )
 
         if pending_followup:
             state.pending_tool_followup_until = 0.0
@@ -1684,6 +1849,7 @@ class DynamicCardPlusPlugin(Star):
                     source=source,
                     now=now,
                     unified_msg_origin=_normalize_id(getattr(event, "unified_msg_origin", "")),
+                    allow_llm_fallback=settings.operation_mode != "tool_reminder",
                 )
             state.manual_suffix = _truncate(suffix, settings.llm_tool_max_length)
             state.manual_full_card = ""
@@ -1719,7 +1885,7 @@ class DynamicCardPlusPlugin(Star):
         state.pending_tool_followup_until = completed_at + 300
         if reminder_binding is not None and reminder_binding.consumed:
             reminder_binding.tool_completed_at = completed_at
-            self._restore_reminder_tools(reminder_binding, "tool_succeeded")
+            self._prepare_compact_followup_tools(reminder_binding, "tool_succeeded")
         logger.info(
             "[%s] LLM tool changed group=%s card=%s reason=%s",
             PLUGIN_ID,
@@ -1952,6 +2118,8 @@ class DynamicCardPlusPlugin(Star):
         source: str,
         now: float,
         unified_msg_origin: str = "",
+        allow_llm_fallback: bool = True,
+        use_generic_fallback: bool = True,
     ) -> tuple[str, str]:
         source = _clean_text(source, "manual")
         if source == "random":
@@ -1965,25 +2133,47 @@ class DynamicCardPlusPlugin(Star):
                     source=candidate,
                     now=now,
                     unified_msg_origin=unified_msg_origin,
+                    allow_llm_fallback=allow_llm_fallback,
+                    use_generic_fallback=False,
                 )
                 if suffix:
                     return suffix, f"随机:{label}"
+            if not allow_llm_fallback and use_generic_fallback:
+                return "思考中", "随机动态来源"
             return "", "随机动态来源"
 
         if source == "thought":
-            suffix = await self._build_thought_suffix(event, state, settings, unified_msg_origin)
+            suffix = await self._build_thought_suffix(
+                event,
+                state,
+                settings,
+                unified_msg_origin,
+                allow_llm=allow_llm_fallback,
+            )
+            if not suffix and not allow_llm_fallback and use_generic_fallback:
+                suffix = "思考中"
             state.thought_suffix = suffix
             state.thought_generated_at = now
             return suffix, "会话想法摘要"
 
         if source == "schedule":
-            suffix = await self._build_schedule_suffix(event, settings, unified_msg_origin)
+            suffix = await self._build_schedule_suffix(
+                event,
+                settings,
+                unified_msg_origin,
+                allow_llm=allow_llm_fallback,
+            )
             state.schedule_suffix = suffix
             state.schedule_generated_at = now
             return suffix, "当天日程"
 
         if source == "whim":
-            suffix = await self._build_whim_suffix(event, settings, unified_msg_origin)
+            suffix = await self._build_whim_suffix(
+                event,
+                settings,
+                unified_msg_origin,
+                allow_llm=allow_llm_fallback,
+            )
             state.whim_suffix = suffix
             state.whim_generated_at = now
             return suffix, "随心后缀"
@@ -2125,8 +2315,10 @@ class DynamicCardPlusPlugin(Star):
         event: AstrMessageEvent | None,
         settings: PluginSettings,
         unified_msg_origin: str = "",
+        *,
+        allow_llm: bool = True,
     ) -> str:
-        if settings.schedule_mode == "llm":
+        if settings.schedule_mode == "llm" and allow_llm:
             values = self._schedule_template_values()
             prompt = (
                 f"{_render_template(settings.schedule_prompt, values)}\n"
@@ -2202,8 +2394,10 @@ class DynamicCardPlusPlugin(Star):
         event: AstrMessageEvent | None,
         settings: PluginSettings,
         unified_msg_origin: str = "",
+        *,
+        allow_llm: bool = True,
     ) -> str:
-        if settings.whim_mode == "llm":
+        if settings.whim_mode == "llm" and allow_llm:
             prompt = (
                 f"{settings.whim_prompt}\n"
                 f"要求：不超过 {settings.whim_max_length} 个字。"
@@ -2227,8 +2421,13 @@ class DynamicCardPlusPlugin(Star):
         state: GroupCardState,
         settings: PluginSettings,
         unified_msg_origin: str = "",
+        *,
+        allow_llm: bool = True,
     ) -> str:
         if not state.recent_messages:
+            return ""
+
+        if not allow_llm:
             return ""
 
         context_text = "\n".join(list(state.recent_messages)[-settings.thought_context_messages :])
