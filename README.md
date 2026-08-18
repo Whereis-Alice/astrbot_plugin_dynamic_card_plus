@@ -125,10 +125,25 @@ tool_reminder_mode.card_template
 提醒注入成功时，AstrBot 日志会包含 `has_tool` 和当前请求的工具列表，例如：
 
 ```text
-[astrbot_plugin_dynamic_card_plus] injected tool reminder group=123 source=schedule has_tool=true tool_count=27
+[astrbot_plugin_dynamic_card_plus] injected tool reminder group=123 source=schedule has_tool=true tool_count=27 initial_tool_count=1 gated=true
 ```
 
 如果 `has_tool=false`，说明本轮请求里没有带上这个工具，需要检查 persona/工具启用设置。普通日志不再打印完整工具样本；开启 `common.debug_log=true` 时，会输出工具样本和本轮注入的提醒提示词；`has_tool=false` 时也会输出工具样本。提醒提示只写入临时 `extra_user_content_parts`，不再写入 `system_prompt`，避免被其他系统提示混淆或引发提示词覆盖问题。
+
+AstrBot 启动 Agent 时会把这段临时提醒复制到 `run_context.messages`。插件在 `set_dynamic_group_card` 真正开始调用前，会同时从原请求和当前 Agent 上下文中只移除带 `[DynamicCardPlus]` 标记的提醒块，保留用户原消息和其他插件注入的内容。
+
+为减少提醒触发时把大量工具 schema 一起交给模型造成的首轮等待，插件只会对这一个请求临时使用仅包含 `set_dynamic_group_card` 的工具集，强制动作完成或 Agent 退出后恢复原始工具集。后续自然回复仍保留歌曲、图片以及其它全部 LLM 工具；这不会停用全局工具，也不会影响普通聊天。
+
+如果 AstrBot 全局 `provider_settings.tool_schema_mode` 使用 `skills_like`，插件会跳过这项门控以避免影响该模式的工具执行链；日志中的 `gated=false` 可据此判断。
+
+延迟排查可按同一条日志中的 `group`、`trigger`、`request` 和 `run_context` 对齐：
+
+- `bound reminder to agent` 的 `inject_to_agent_begin_seconds`：提醒注入到 Agent 真正开始。
+- `injected tool reminder` 中的 `initial_tool_count` 和 `gated`：首轮强制动作是否启用了请求级单工具门控；`tool_count` 是原始完整工具数量。
+- `reminder reached tool` 的 `wait_seconds`：提醒注入到模型返回工具调用；这里很长且同时出现 `Request timed out` 时，主要是在等待 Chat Provider 或其重试。
+- `restored reminder follow-up tools`：名片工具完成后恢复完整工具集，日志中的 `1->N` 表示首轮门控到后续回复的恢复。
+- `reminder agent finished` 的 `tool_to_agent_done_seconds`：改名工具完成后到模型生成最终聊天回复。
+- `set_group_card succeeded` 前后的时间：OneBot 修改群名片接口自身耗时。
 
 ## 完整名片模板
 

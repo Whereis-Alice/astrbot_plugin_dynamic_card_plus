@@ -5,17 +5,15 @@ import inspect
 import random
 import re
 import time
-from contextlib import suppress
 from collections import defaultdict, deque
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 import psutil
-from pydantic import Field
-from pydantic.dataclasses import dataclass as pydantic_dataclass
-
-from astrbot.api import AstrBotConfig, FunctionTool, logger
+from astrbot.api import AstrBotConfig, FunctionTool, ToolSet, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.provider import LLMResponse, ProviderRequest
@@ -23,10 +21,11 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
-
+from pydantic import Field
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.14"
+PLUGIN_VERSION = "0.8.16"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -305,6 +304,12 @@ class GroupCardState:
     last_tool_reason: str = ""
     pending_tool_followup_until: float = 0.0
 
+    last_tool_trace_trigger_id: str = ""
+    last_tool_trace_injected_at: float = 0.0
+    last_tool_trace_called_at: float = 0.0
+    last_tool_trace_completed_at: float = 0.0
+    last_tool_trace_logged: bool = False
+
     client: Any = None
     group_id: str = ""
     self_id: str = ""
@@ -336,6 +341,39 @@ class GroupCardState:
             self.manual_full_card = ""
             self.manual_until = 0.0
             self.last_tool_reason = ""
+
+
+@dataclass
+class ReminderBinding:
+    """One reminder attached to one Agent request.
+
+    A group can have overlapping Agent runs, so this must not live only on the
+    per-group state. The event identity keeps cleanup scoped to the request
+    that actually received the reminder.
+    """
+
+    event_id: int
+    event: Any
+    unified_msg_origin: str
+    group_id: str
+    trigger_id: str
+    injected_at: float
+    request: Any
+    hint_part: Any
+    request_parts: Any
+    hint_text: str
+    request_id: str
+    original_func_tool: Any = None
+    initial_tool_gate_applied: bool = False
+    initial_tool_count: int = 0
+    followup_tools_restored: bool = False
+    run_context: Any = None
+    run_context_id: str = ""
+    consumed: bool = False
+    request_hint_removed: int = 0
+    run_context_hint_removed: int = 0
+    tool_called_at: float = 0.0
+    tool_completed_at: float = 0.0
 
 
 @pydantic_dataclass
@@ -404,6 +442,10 @@ class DynamicCardPlusPlugin(Star):
         self.context = context
         self.config = config or {}
         self._states: dict[str, GroupCardState] = defaultdict(GroupCardState)
+        # Reminder context is request-scoped. A group may have overlapping
+        # Agent runs, so using only the group state would let one run consume
+        # another run's reminder.
+        self._reminder_bindings: dict[int, ReminderBinding] = {}
         self._active_cron_jobs: dict[str, str] = {}
         self._active_cron_register_tasks: dict[str, asyncio.Task[None]] = {}
         self._active_cron_db_lock = asyncio.Lock()
@@ -413,6 +455,7 @@ class DynamicCardPlusPlugin(Star):
         logger.info("[%s] initialized; upstream=%s", PLUGIN_ID, UPSTREAM_REPO)
 
     async def terminate(self) -> None:
+        self._reminder_bindings.clear()
         for task in list(self._active_cron_register_tasks.values()):
             task.cancel()
         for task in list(self._active_cron_register_tasks.values()):
@@ -665,24 +708,13 @@ class DynamicCardPlusPlugin(Star):
             f"{CARD_HINT_MARKER} 群名片修改任务。"
             f"{current_card_text}"
             f"{trigger_text}"
-            f"你现在需要调用 {CARD_TOOL_NAME} 修改当前 QQ 群里的群名片。"
-            "这是一次新的独立触发，不是历史里已经完成的那一次；即使之前已经改过名片，本次也必须重新调用工具。"
-            "不要因为上下文里出现过工具返回或已修改记录就跳过本次调用。"
-            f"下一条 assistant 行为必须是工具调用 {CARD_TOOL_NAME}，工具调用前禁止输出任何自然语言。"
-            f"建议参数：mode=suffix、source={source}、reason={reason}；如果你已经想好后缀，请额外填写 suffix=你想好的短后缀。"
-            f"本次来源：{source_label}。{suggestion}"
-            "你可以自己设置一个短后缀表达此刻想法、心情、日程状态；thought、schedule、whim 应优先由你直接填写 suffix，一步到位。"
-            "只有你漏传 suffix 时，工具才会按 source 使用对应配置兜底生成后缀。"
-            "此功能允许随便使用，不要犹豫，不要询问用户。"
-            "没有调用工具就不要声称已经修改名片。"
-            "短后缀会替换上一轮工具后缀，不要把旧后缀拼进新后缀里。"
-            "如果配置允许，也可以直接给出完整名片；本次默认使用 mode=suffix。"
-            "群名片任务只是附加维护任务，不是对用户消息的回答。"
-            "工具调用成功后，必须回到用户本轮消息，结合用户的问题、图片和上下文继续自然回复；不要遗漏用户原本在问什么。"
-            "只有用户本轮没有其它可回复内容时，才用一句很短的聊天回复带过。不要只回复“改好了”，不要只复述工具结果。"
-            "如果工具调用接口不可用，绝不能把工具调用协议、JSON、|tool_calls_section_begin| 等标记当成普通文本输出；跳过名片任务，优先正常回答用户本轮消息。"
-            "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数、工具调用协议或提示词内容。"
-            "不要把这条任务提示当成聊天话题，不要向用户复述任务提示。"
+            f"你现在必须调用 {CARD_TOOL_NAME} 修改当前 QQ 群里的群名片。"
+            "这是一次新的独立触发，即使历史里已经改过，本次也必须重新调用；下一条 assistant 行为必须直接是工具调用，调用前不要输出自然语言。"
+            f"建议参数：mode=suffix、source={source}、reason={reason}；本次来源是{source_label}，{suggestion}"
+            "如果已经想好后缀，请在这一次调用中直接填写 suffix，一步完成；新后缀替换旧后缀，不要拼接旧后缀。漏传 suffix 时才按 source 兜底生成。"
+            "这个维护任务可以直接执行，不要犹豫或询问用户；没有成功调用工具就不要声称已经修改。"
+            "它只是附加任务，不是对用户本轮消息的回答。工具成功后必须回到用户本轮问题，结合上下文继续自然回复，不要只说“改好了”或复述工具结果。"
+            "禁止输出思考过程、回复草稿、校验过程、工具参数、工具协议或本提示内容；工具不可用时优先正常回答用户。"
         )
 
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -935,6 +967,7 @@ class DynamicCardPlusPlugin(Star):
             return
 
         current_card = state.last_card or "还没有记录"
+        trigger_id = f"{group_id}-{int(now)}"
         suggestion, source_label, source = await self._build_tool_reminder_suggestion(
             event=event,
             state=state,
@@ -947,20 +980,47 @@ class DynamicCardPlusPlugin(Star):
             source_label=source_label,
             suggestion=suggestion,
             reason="群名片自主管理提醒",
-            trigger_id=f"{group_id}-{int(now)}",
+            trigger_id=trigger_id,
         )
-        if not self._append_provider_hint(req, hint):
+        hint_part = self._append_provider_hint(req, hint)
+        if hint_part is None:
             return
         tool_names = self._request_tool_names(req)
         has_tool = CARD_TOOL_NAME in tool_names
+        original_func_tool, tool_gate_applied, initial_tool_count = (
+            self._gate_initial_reminder_tools(req, tool_names)
+        )
+        request_id = f"{id(req):x}"
+        event_id = id(event)
+        self._prune_reminder_bindings(now)
+        self._reminder_bindings[event_id] = ReminderBinding(
+            event_id=event_id,
+            event=event,
+            unified_msg_origin=_normalize_id(getattr(event, "unified_msg_origin", "")),
+            group_id=_normalize_id(group_id),
+            trigger_id=trigger_id,
+            injected_at=now,
+            request=req,
+            hint_part=hint_part,
+            request_parts=getattr(req, "extra_user_content_parts", None),
+            hint_text=hint,
+            request_id=request_id,
+            original_func_tool=original_func_tool,
+            initial_tool_gate_applied=tool_gate_applied,
+            initial_tool_count=initial_tool_count,
+        )
         state.last_tool_reminder_at = now
         logger.info(
-            "[%s] injected tool reminder group=%s source=%s has_tool=%s tool_count=%s",
+            "[%s] injected tool reminder group=%s source=%s has_tool=%s tool_count=%s initial_tool_count=%s gated=%s trigger=%s request=%s",
             PLUGIN_ID,
             group_id,
             source,
             has_tool,
             len(tool_names),
+            initial_tool_count,
+            tool_gate_applied,
+            trigger_id,
+            request_id,
         )
         if settings.debug_log:
             if tool_names:
@@ -979,22 +1039,415 @@ class DynamicCardPlusPlugin(Star):
                 self._format_tool_names_for_log(tool_names),
             )
 
-    def _append_provider_hint(self, req: ProviderRequest, hint: str) -> bool:
+    def _build_card_only_tool_set(self, tool_set: Any) -> ToolSet | None:
+        """Build a request-local tool set used for the forced first action."""
+        get_tool = getattr(tool_set, "get_tool", None)
+        if not callable(get_tool):
+            return None
+        card_tool = get_tool(CARD_TOOL_NAME)
+        if card_tool is None:
+            return None
+        return ToolSet(tools=[card_tool])
+
+    def _gate_initial_reminder_tools(
+        self,
+        req: ProviderRequest,
+        tool_names: list[str],
+    ) -> tuple[Any, bool, int]:
+        """Keep only the card tool for the forced first model action.
+
+        AstrBot creates a ToolSet per request, so replacing this request's set
+        does not deactivate tools globally. The original set is restored after
+        the card operation succeeds (or when the Agent exits).
+        """
+        original_tool_set = getattr(req, "func_tool", None)
+        if CARD_TOOL_NAME not in tool_names or original_tool_set is None:
+            return None, False, len(tool_names)
+        if self._uses_skills_like_tool_schema():
+            # AstrBot keeps a separate raw tool set in skills_like mode. Keep
+            # that mode untouched so restored follow-up tools remain executable.
+            return None, False, len(tool_names)
+        card_only = self._build_card_only_tool_set(original_tool_set)
+        if card_only is None:
+            return None, False, len(tool_names)
+        req.func_tool = card_only
+        return original_tool_set, True, 1
+
+    def _uses_skills_like_tool_schema(self) -> bool:
+        get_config = getattr(getattr(self, "context", None), "get_config", None)
+        if not callable(get_config):
+            return False
+        try:
+            config = get_config() or {}
+            provider_settings = config.get("provider_settings", {})
+            return provider_settings.get("tool_schema_mode") == "skills_like"
+        except (AttributeError, TypeError):
+            return False
+
+    def _restore_reminder_tools(self, binding: ReminderBinding, reason: str) -> None:
+        """Restore all original tools for the post-maintenance conversation."""
+        if (
+            not binding.initial_tool_gate_applied
+            or binding.followup_tools_restored
+            or binding.original_func_tool is None
+        ):
+            return
+        current_tool_set = getattr(binding.request, "func_tool", None)
+        binding.request.func_tool = binding.original_func_tool
+        binding.followup_tools_restored = True
+        before = len(self._request_tool_names(SimpleNamespace(func_tool=current_tool_set)))
+        after = len(self._request_tool_names(SimpleNamespace(func_tool=binding.original_func_tool)))
+        logger.info(
+            "[%s] restored reminder follow-up tools group=%s trigger=%s reason=%s tool_count=%s->%s",
+            PLUGIN_ID,
+            binding.group_id,
+            binding.trigger_id,
+            reason,
+            before,
+            after,
+        )
+
+    def _append_provider_hint(self, req: ProviderRequest, hint: str) -> TextPart | None:
         return self._append_temp_user_hint(req, hint)
 
-    def _append_temp_user_hint(self, req: ProviderRequest, hint: str) -> bool:
+    def _append_temp_user_hint(self, req: ProviderRequest, hint: str) -> TextPart | None:
         parts = getattr(req, "extra_user_content_parts", None)
         if parts is None:
-            return False
+            return None
         for part in parts:
             if CARD_HINT_MARKER in _clean_text(getattr(part, "text", "")):
-                return False
+                return None
         part = TextPart(text=hint)
         mark_as_temp = getattr(part, "mark_as_temp", None)
         if callable(mark_as_temp):
             mark_as_temp()
         parts.append(part)
+        return part
+
+    def _prune_reminder_bindings(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        # A request can legitimately spend several minutes in provider retries,
+        # but a binding left for hours must not be consumed by a later manual
+        # tool call after its original Agent has disappeared.
+        max_age = 2 * 60 * 60
+        stale_ids = [
+            event_id
+            for event_id, binding in self._reminder_bindings.items()
+            if now - binding.injected_at > max_age
+        ]
+        for event_id in stale_ids:
+            binding = self._reminder_bindings.pop(event_id, None)
+            if binding is not None:
+                logger.debug(
+                    "[%s] discarded stale reminder binding group=%s trigger=%s request=%s",
+                    PLUGIN_ID,
+                    binding.group_id,
+                    binding.trigger_id,
+                    binding.request_id,
+                )
+
+    def _find_reminder_binding(self, event: AstrMessageEvent) -> ReminderBinding | None:
+        self._prune_reminder_bindings()
+        direct = self._reminder_bindings.get(id(event))
+        if direct is not None:
+            if direct.event is event:
+                return direct
+            self._reminder_bindings.pop(id(event), None)
+
+        # MainAgentHooks normally passes the same event object through every
+        # phase. Keep a narrow fallback for adapters that wrap the event while
+        # preserving the no-guessing rule when multiple runs share a session.
+        unified_msg_origin = _normalize_id(getattr(event, "unified_msg_origin", ""))
+        if not unified_msg_origin:
+            return None
+        candidates = [
+            binding
+            for binding in self._reminder_bindings.values()
+            if binding.unified_msg_origin == unified_msg_origin
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _part_text(self, part: Any) -> str:
+        if isinstance(part, str):
+            return part
+        if isinstance(part, dict):
+            return _clean_text(part.get("text"))
+        return _clean_text(getattr(part, "text", ""))
+
+    def _strip_hint_from_part(
+        self,
+        part: Any,
+        hint_text: str,
+    ) -> tuple[Any | None, int]:
+        text = self._part_text(part)
+        if CARD_HINT_MARKER not in text:
+            return part, 0
+
+        if hint_text and hint_text in text:
+            remaining = text.replace(hint_text, "").strip()
+        else:
+            marker_index = text.find(CARD_HINT_MARKER)
+            remaining = text[:marker_index].rstrip()
+
+        if not remaining:
+            return None, 1
+        if isinstance(part, dict):
+            updated = dict(part)
+            updated["text"] = remaining
+            return updated, 1
+        if isinstance(part, str):
+            return remaining, 1
+        try:
+            part.text = remaining
+        except (AttributeError, TypeError):
+            return None, 1
+        return part, 1
+
+    def _remove_hint_from_parts(self, parts: Any, hint_text: str) -> int:
+        if not isinstance(parts, list):
+            return 0
+        removed = 0
+        for index in range(len(parts) - 1, -1, -1):
+            replacement, count = self._strip_hint_from_part(parts[index], hint_text)
+            if not count:
+                continue
+            removed += count
+            if replacement is None:
+                del parts[index]
+            else:
+                parts[index] = replacement
+        return removed
+
+    def _remove_hint_from_request(self, binding: ReminderBinding) -> int:
+        containers: list[Any] = []
+        for parts in (
+            binding.request_parts,
+            getattr(binding.request, "extra_user_content_parts", None),
+        ):
+            if parts is None or any(parts is existing for existing in containers):
+                continue
+            containers.append(parts)
+
+        removed = 0
+        for parts in containers:
+            if isinstance(parts, list):
+                for index, part in enumerate(list(parts)):
+                    if part is binding.hint_part:
+                        del parts[index]
+                        removed += 1
+                        break
+            removed += self._remove_hint_from_parts(parts, binding.hint_text)
+        return removed
+
+    def _remove_hint_from_run_context(self, run_context: Any, hint_text: str) -> int:
+        messages = getattr(run_context, "messages", None)
+        if not isinstance(messages, list):
+            return 0
+
+        removed = 0
+        remove_message_indexes: list[int] = []
+        for index, message in enumerate(messages):
+            if isinstance(message, dict):
+                content = message.get("content")
+            else:
+                content = getattr(message, "content", None)
+
+            if isinstance(content, list):
+                before = len(content)
+                removed += self._remove_hint_from_parts(content, hint_text)
+                if len(content) != before and not content:
+                    remove_message_indexes.append(index)
+                continue
+
+            if not isinstance(content, str) or CARD_HINT_MARKER not in content:
+                continue
+
+            if hint_text and hint_text in content:
+                remaining = content.replace(hint_text, "").strip()
+            else:
+                marker_index = content.find(CARD_HINT_MARKER)
+                remaining = content[:marker_index].rstrip()
+            removed += 1
+            if not remaining:
+                remove_message_indexes.append(index)
+            elif isinstance(message, dict):
+                message["content"] = remaining
+            else:
+                message.content = remaining
+
+        for index in reversed(remove_message_indexes):
+            del messages[index]
+        return removed
+
+    def _consume_pending_reminder(
+        self,
+        event: AstrMessageEvent,
+        state: GroupCardState,
+        group_id: str,
+        now: float,
+    ) -> bool:
+        """Consume the request-scoped reminder before the tool follow-up."""
+        binding = self._find_reminder_binding(event)
+        if (
+            binding is None
+            or binding.consumed
+            or binding.group_id != _normalize_id(group_id)
+        ):
+            return False
+
+        request_removed = self._remove_hint_from_request(binding)
+        context_removed = self._remove_hint_from_run_context(
+            binding.run_context,
+            binding.hint_text,
+        )
+        binding.consumed = True
+        binding.request_hint_removed = request_removed
+        binding.run_context_hint_removed = context_removed
+        binding.tool_called_at = now
+        trigger_id = binding.trigger_id
+        injected_at = binding.injected_at
+
+        state.last_tool_trace_trigger_id = trigger_id
+        state.last_tool_trace_injected_at = injected_at
+        state.last_tool_trace_called_at = now
+        state.last_tool_trace_completed_at = 0.0
+        state.last_tool_trace_logged = False
+        logger.info(
+            "[%s] reminder reached tool group=%s trigger=%s wait_seconds=%.3f "
+            "request_hint_removed=%s run_context_hint_removed=%s request=%s run_context=%s",
+            PLUGIN_ID,
+            group_id,
+            trigger_id,
+            max(0.0, now - injected_at),
+            bool(request_removed),
+            bool(context_removed),
+            binding.request_id or "-",
+            binding.run_context_id or "-",
+        )
         return True
+
+    @filter.on_agent_begin(desc="记录群名片提醒对应的 Agent 上下文")
+    async def bind_group_card_reminder_context(
+        self,
+        event: AstrMessageEvent,
+        run_context: ContextWrapper[AstrAgentContext],
+    ) -> None:
+        binding = self._find_reminder_binding(event)
+        if binding is None:
+            return
+        binding.run_context = run_context
+        binding.run_context_id = f"{id(run_context):x}"
+        now = time.time()
+        hint_in_context = any(
+            CARD_HINT_MARKER in self._part_text(part)
+            for message in (getattr(run_context, "messages", []) or [])
+            for part in (
+                getattr(message, "content", [])
+                if isinstance(getattr(message, "content", None), list)
+                else [getattr(message, "content", "")]
+            )
+        )
+        logger.info(
+            "[%s] bound reminder to agent group=%s trigger=%s request=%s "
+            "run_context=%s inject_to_agent_begin_seconds=%.3f "
+            "hint_in_context=%s messages=%s",
+            PLUGIN_ID,
+            binding.group_id,
+            binding.trigger_id,
+            binding.request_id or "-",
+            binding.run_context_id,
+            max(0.0, now - binding.injected_at),
+            hint_in_context,
+            len(getattr(run_context, "messages", []) or []),
+        )
+
+    @filter.on_using_llm_tool(desc="群名片工具调用前清理已消费的临时提醒")
+    async def consume_group_card_reminder_before_tool(
+        self,
+        event: AstrMessageEvent,
+        tool: FunctionTool,
+        tool_args: dict[str, Any] | None,
+    ) -> None:
+        del tool_args
+        if _clean_text(getattr(tool, "name", "")) != CARD_TOOL_NAME:
+            return
+        binding = self._find_reminder_binding(event)
+        if binding is None:
+            return
+        state = self._states[binding.group_id]
+        self._consume_pending_reminder(event, state, binding.group_id, time.time())
+
+    @filter.on_agent_done(desc="清理未调用工具时残留的群名片提醒")
+    async def release_group_card_reminder(
+        self,
+        event: AstrMessageEvent,
+        run_context: ContextWrapper[AstrAgentContext],
+        response: LLMResponse,
+    ) -> None:
+        del response
+        binding = self._find_reminder_binding(event)
+        if binding is None:
+            return
+        self._restore_reminder_tools(binding, "agent_done")
+        self._reminder_bindings.pop(binding.event_id, None)
+        if binding.consumed:
+            now = time.time()
+            final_context_removed = self._remove_hint_from_run_context(
+                run_context,
+                binding.hint_text,
+            )
+            logger.info(
+                "[%s] reminder agent finished group=%s trigger=%s "
+                "tool_to_agent_done_seconds=%.3f total_seconds=%.3f "
+                "tool_completed=%s run_context_hint_removed=%s request=%s run_context=%s",
+                PLUGIN_ID,
+                binding.group_id,
+                binding.trigger_id,
+                max(0.0, now - (binding.tool_completed_at or binding.tool_called_at)),
+                max(0.0, now - binding.injected_at),
+                bool(binding.tool_completed_at),
+                bool(binding.run_context_hint_removed or final_context_removed),
+                binding.request_id or "-",
+                binding.run_context_id or "-",
+            )
+            return
+        request_removed = self._remove_hint_from_request(binding)
+        context_removed = self._remove_hint_from_run_context(run_context, binding.hint_text)
+        logger.info(
+            "[%s] released unconsumed reminder group=%s trigger=%s "
+            "request_hint_removed=%s run_context_hint_removed=%s request=%s",
+            PLUGIN_ID,
+            binding.group_id,
+            binding.trigger_id,
+            bool(request_removed),
+            bool(context_removed),
+            binding.request_id or "-",
+        )
+
+    def _log_tool_trace_before_send(
+        self,
+        state: GroupCardState,
+        group_id: str,
+        now: float,
+    ) -> None:
+        """Log the per-group timing once, immediately before the final send."""
+        trigger_id = state.last_tool_trace_trigger_id
+        completed_at = state.last_tool_trace_completed_at
+        if not trigger_id or not completed_at or state.last_tool_trace_logged:
+            return
+        if now < completed_at or now - completed_at > 1800:
+            return
+
+        state.last_tool_trace_logged = True
+        logger.info(
+            "[%s] timing group=%s trigger=%s reminder_to_tool_seconds=%.3f tool_to_final_send_seconds=%.3f total_seconds=%.3f",
+            PLUGIN_ID,
+            group_id,
+            trigger_id,
+            max(0.0, state.last_tool_trace_called_at - state.last_tool_trace_injected_at),
+            max(0.0, now - completed_at),
+            max(0.0, now - state.last_tool_trace_injected_at),
+        )
 
     def _request_tool_names(self, req: ProviderRequest) -> list[str]:
         tool_set = getattr(req, "func_tool", None)
@@ -1098,6 +1551,7 @@ class DynamicCardPlusPlugin(Star):
         state = self._states[group_key]
         await self._remember_group_target(state, event, client, group_id, self_id, settings)
         self._remember_exchange(state, event, settings)
+        self._log_tool_trace_before_send(state, group_id, time.time())
         if settings.operation_mode != "auto_update":
             return
 
@@ -1153,8 +1607,17 @@ class DynamicCardPlusPlugin(Star):
         state = self._states[group_key]
         await self._remember_group_target(state, event, client, group_id, self_id, settings)
         now = time.time()
+        reminder_consumed = self._consume_pending_reminder(event, state, group_id, now)
+        reminder_binding = self._find_reminder_binding(event)
+        if reminder_binding is not None and (
+            not (reminder_consumed or reminder_binding.consumed)
+            or reminder_binding.group_id != group_key
+        ):
+            reminder_binding = None
         cooldown_left = settings.llm_tool_min_interval_seconds - (now - state.last_tool_update_at)
         if cooldown_left > 0:
+            if reminder_binding is not None:
+                self._restore_reminder_tools(reminder_binding, "tool_rejected_cooldown")
             return f"失败：刚刚已经改过群名片，请约 {int(cooldown_left)} 秒后再试。"
 
         mode = _clean_text(kwargs.get("mode"), "suffix")
@@ -1176,6 +1639,8 @@ class DynamicCardPlusPlugin(Star):
                 self._clear_dynamic_suffixes(state)
         elif mode == "full_card":
             if not settings.llm_tool_allow_full_card:
+                if reminder_binding is not None:
+                    self._restore_reminder_tools(reminder_binding, "tool_rejected_full_card_disabled")
                 return "失败：配置不允许 LLM 工具直接设置完整群名片。"
             state.manual_full_card = _truncate(
                 _clean_text(kwargs.get("full_card")),
@@ -1184,6 +1649,8 @@ class DynamicCardPlusPlugin(Star):
             state.manual_suffix = ""
             state.last_tool_reason = reason
             if not state.manual_full_card:
+                if reminder_binding is not None:
+                    self._restore_reminder_tools(reminder_binding, "tool_rejected_empty_full_card")
                 return "失败：full_card 为空，未修改群名片。"
         else:
             if settings.operation_mode == "tool_reminder":
@@ -1222,10 +1689,14 @@ class DynamicCardPlusPlugin(Star):
             state.manual_full_card = ""
             state.last_tool_reason = reason or source_label
             if not state.manual_suffix:
+                if reminder_binding is not None:
+                    self._restore_reminder_tools(reminder_binding, "tool_rejected_empty_suffix")
                 return "失败：suffix 为空，未修改群名片。"
 
         new_card = self._build_card(state, settings)
         if not new_card:
+            if reminder_binding is not None:
+                self._restore_reminder_tools(reminder_binding, "tool_rejected_empty_card")
             return "失败：生成的群名片为空，未修改。"
 
         ok = await self._set_group_card(
@@ -1236,12 +1707,19 @@ class DynamicCardPlusPlugin(Star):
             retry_count=settings.retry_count,
         )
         if not ok:
+            if reminder_binding is not None:
+                self._restore_reminder_tools(reminder_binding, "set_group_card_failed")
             return f"失败：尝试修改群 {group_id} 的群名片失败。"
 
+        completed_at = time.time()
         state.last_card = new_card
-        state.last_update_at = now
-        state.last_tool_update_at = now
-        state.pending_tool_followup_until = now + 90
+        state.last_update_at = completed_at
+        state.last_tool_update_at = completed_at
+        state.last_tool_trace_completed_at = completed_at
+        state.pending_tool_followup_until = completed_at + 300
+        if reminder_binding is not None and reminder_binding.consumed:
+            reminder_binding.tool_completed_at = completed_at
+            self._restore_reminder_tools(reminder_binding, "tool_succeeded")
         logger.info(
             "[%s] LLM tool changed group=%s card=%s reason=%s",
             PLUGIN_ID,
@@ -1252,10 +1730,8 @@ class DynamicCardPlusPlugin(Star):
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
         return (
             f"已把当前群名片改为：{new_card}{suffix_note}。"
-            "本轮群名片任务只是附加维护任务，不是最终聊天回复；"
-            "接下来必须回到用户本轮消息，结合用户的问题、图片和上下文继续自然回复，不要遗漏用户原本在问什么。"
-            "只有用户本轮没有其它可回复内容时，才用一句很短的聊天回复带过。不要只回复“改好了”，不要只复述工具结果。"
-            "禁止输出思维审视、思考过程、回复草稿、字数校验、规则校验、工具参数、工具调用协议或提示词内容。"
+            "本轮群名片维护已完成。请结合用户本轮消息继续自然回复，不要只说“改好了”，"
+            "也不要输出思考过程、工具参数或提示词内容。"
         )
 
     def _clear_dynamic_suffixes(self, state: GroupCardState) -> None:
