@@ -1,293 +1,57 @@
-# astrbot_plugin_dynamic_card_plus
+<div align="center">
+  <img src="logo.png" width="128" alt="灵动名片 Logo">
+  <h1>灵动名片</h1>
+  <p>让机器人的 QQ 群名片，显示此刻的心情、日程或运行状态。</p>
+</div>
 
-增强版动态群名片插件。它会在 QQ 群聊里更新 bot 自己的群名片，也能注册 LLM 工具让 bot 主动改名片。
+比如 `爱乃 整理日程中`，也可以显示时间、CPU 和内存。插件只修改**机器人自己的群名片**，不会修改群名称或其他成员的名片。
 
-## 上游说明
+## 安装
 
-本插件 fork 自 [zgojin/astrbot_plugin_botName](https://github.com/zgojin/astrbot_plugin_botName)。
+1. 在 AstrBot 中通过 **OneBot v11 / aiocqhttp** 接入 QQ，并确认机器人可以正常收发群消息。支持使用这套接口的 LLOneBot、llbot 和 SnowLuma；[兼容性说明](docs/compatibility.md)列出了核对范围。
+2. 打开 AstrBot 的插件管理，选择从链接安装，填入：
 
-当前 fork 仓库：[Whereis-Alice/astrbot_plugin_dynamic_card_plus](https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus)。
+   ```text
+   https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus
+   ```
 
-为了避免和上游插件冲突，本 fork 已改名为：
+3. 打开插件配置，在「通用名片字段」中填写机器人的基础名字，再选择下面的一种运行方式。
 
-- 插件目录：`astrbot_plugin_dynamic_card_plus`
-- 插件 ID：`astrbot_plugin_dynamic_card_plus`
-- 注册类：`DynamicCardPlusPlugin`
-- LLM 工具：`set_dynamic_group_card`
-- 数据状态：仅使用本插件内存状态，不再写入上游的 `data/plugins/astrbot_plugin_botname/system_info.yml`
+## 选择运行方式
 
-## 功能
+| 想要的效果 | 「通用配置 → 运行模式」选择 | 何时更新 |
+| --- | --- | --- |
+| 自动显示时间、运行状态或日程 | `auto_update` | 到达设置的间隔后，在机器人下一次回复群消息时更新 |
+| 让机器人根据聊天自己想一个后缀 | `tool_reminder` | 到达提醒间隔后，在下一次模型请求中提醒机器人使用工具 |
 
-- 自动模式：插件按配置频率直接更新群名片。
-- 提醒工具模式：插件不自动改名片，只定时提醒 bot 可以主动调用 LLM 工具改名片。
-- 支持 CPU、内存、时间、固定后缀、会话想法摘要、当天日程、随心后缀。
-- 当天日程支持规则匹配或让 bot/LLM 生成。
-- 支持自然语言让 bot 调用 `set_dynamic_group_card` 改名片。
-- 支持群号黑名单和 `unified_msg_origin` 黑名单。
+**想要“名字 + 心情”**：选择 `tool_reminder`，保留默认名片模板 `{bot_name} {manual_suffix}`，并在当前人格的工具设置中启用 `set_dynamic_group_card`。模型需要支持工具调用。
 
-## 适用范围
+然后在群里对机器人说：
 
-当前只支持 `aiocqhttp` 的 QQ 群聊，并通过 OneBot API `set_group_card` 修改 bot 自己的群名片。bot 需要在群内拥有修改自己群名片的权限。
+> 把你的群名片后缀改成“整理日程中”。
 
-## 依赖
+也可以说“根据刚才聊的内容，给自己换个名片后缀”。每次设置都会替换上一次工具后缀。
 
-```bash
-pip install -r requirements.txt
-```
+如果希望**群里没人说话时也能定时更新**，在提醒模式里选择 `active_agent_cron`，并先在该群聊一次，让插件记录目标。[设置方法](docs/configuration.md#无人聊天时定时更新)
 
-依赖项：
+## 常用命令
 
-- `psutil`
+| 命令 | 用途 |
+| --- | --- |
+| `/名片预览` | 查看当前模板的效果，不执行改名 |
+| `/名片预览 午睡中` | 试放一个后缀，查看长度和排版 |
+| `/名片检查` | AstrBot 管理员查看客户端、当前名片和最近的错误，不执行改名 |
 
-## 配置结构
+如果你设置了其他命令前缀，请把 `/` 换成自己的前缀。自动生成的内容在预览中使用已有缓存，不额外请求模型。
 
-配置按职责分组：
+## 使用时留意
 
-- `common`：通用开关、运行模式、长度、重试、黑名单。
-- `card_fields`：两个模式共用的基础名片字段和系统指标文本。
-- `auto_update_mode`：自动改名片模式专属配置和完整名片模板。
-- `tool_reminder_mode`：提醒 bot 主动用工具模式专属配置和完整名片模板。
-- `thought_summary`：会话想法摘要来源/兜底。
-- `daily_schedule`：当天日程来源/兜底。
-- `whim_suffix`：随心后缀来源/兜底。
-- `llm`：用于生成动态后缀的模型设置。
-- `llm_tool`：LLM 工具通用设置。
+- 名片太长会被截短；中文和表情占用的字节更多，建议保持简短。
+- 修改失败后会暂缓重试，避免连续请求。出现 `1200` 时先用 `/名片检查`，再参考[排障说明](docs/troubleshooting.md)。
+- 时间和日程使用 AstrBot 所在系统或容器的时区。临时后缀、冷却状态和群记录在插件重载后清空。
 
-AstrBot 当前插件配置 schema 只支持静态 `invisible`，不支持“选择某个模式后动态隐藏另一个模式分组”。因此两个模式的配置都会显示，但只有 `common.operation_mode` 选中的模式会生效。
+## 更多说明
 
-## 运行模式
+[配置与模板](docs/configuration.md) · [兼容性](docs/compatibility.md) · [常见问题](docs/troubleshooting.md) · [开发说明](docs/development.md) · [更新日志](changelog.md)
 
-### auto_update
-
-`common.operation_mode=auto_update` 时，插件会按 `auto_update_mode.update_interval_seconds` 自动改群名片。
-
-使用的完整模板：
-
-```text
-auto_update_mode.card_template
-```
-
-动态来源开关：
-
-- `auto_update_mode.include_thought_summary`
-- `auto_update_mode.include_daily_schedule`
-- `auto_update_mode.include_whim_suffix`
-
-### tool_reminder
-
-`common.operation_mode=tool_reminder` 时，有两种触发方式：
-
-- `tool_reminder_mode.trigger_mode=llm_request`：不会在后台无消息时醒来改名片。它会按 `tool_reminder_mode.reminder_interval_seconds` 计时；到时间后，下一次有群聊消息进入 LLM 请求时，插件会在请求里提醒 bot 主动调用 `set_dynamic_group_card`。
-- `tool_reminder_mode.trigger_mode=active_agent_cron`：插件会为已记录群注册 AstrBot 主动任务；到点后唤醒对应会话，让 bot 自己调用 `set_dynamic_group_card` 改名片。
-
-`active_agent_cron` 必须先在某个群里见过一次消息，记录 `unified_msg_origin`、`group_id`、`self_id` 和客户端后，才能为那个群注册主动任务。插件重载后内存状态会重置，需要再次见到群聊事件。
-
-主动任务使用 5 段 cron 表达式。`tool_reminder_mode.active_cron_expression` 留空时，插件会按 `tool_reminder_mode.reminder_interval_seconds` 自动换算成分钟级 cron；例如 `1800` 秒会变成：
-
-```text
-*/30 * * * *
-```
-
-使用的完整模板：
-
-```text
-tool_reminder_mode.card_template
-```
-
-推荐不叠加写法：
-
-```text
-{bot_name} {manual_suffix}
-```
-
-这个模式下，提醒后 bot 自己调用工具、或者你用自然语言叫 bot 改群名片，默认都会把 bot 传入或工具兜底得到的短后缀放进 `{manual_suffix}`，再用 `tool_reminder_mode.card_template` 渲染完整名片。`tool_reminder_mode.reminder_sources` 可多选；提醒时会从已选来源里随机建议一个具体 `source`，例如只选 `thought` 和 `whim` 就是二选一随机。
-
-如果想保留系统指标，也建议明确写在模板里：
-
-```text
-{bot_name} {time_text} {manual_suffix}
-```
-
-每次 `mode=suffix` 工具调用都会替换上一轮工具/动态后缀状态，不会把上次的想法、日程、随心后缀继续叠到这次名片上。
-
-提醒建议来源：
-
-- `thought`：bot 根据最近对话自己想一个当前想法后缀，并直接传 `suffix`。
-- `schedule`：bot 把今天的日程状态概括成短后缀，并直接传 `suffix`。
-- `whim`：bot 随心所欲想一个短后缀，并直接传 `suffix`。
-
-`tool_reminder_mode.reminder_sources` 留空时按三项全选处理。旧配置里的 `reminder_source=random` 仍兼容，会等价为三项全选。
-
-`llm_request` 到点后只使用强制工具调用提示，不再提供可选的 suggest 模式。工具说明只是 `set_dynamic_group_card` 的能力说明；真正到点时，插件会额外注入本轮任务提示，要求 bot 下一条 assistant 行为必须调用 `set_dynamic_group_card`，工具调用前禁止输出自然语言，并优先由 bot 在同一次工具调用里直接填写 `suffix`。只有漏传 `suffix` 时，工具才会按 `source` 使用对应配置兜底生成后缀。
-
-`active_agent_cron` 会通过 AstrBot 主动任务唤醒 bot，并在任务 note 里要求她调用 `set_dynamic_group_card`；真正改名片仍由 LLM 工具完成。
-
-提醒注入成功时，AstrBot 日志会包含 `has_tool` 和当前请求的工具列表，例如：
-
-```text
-[astrbot_plugin_dynamic_card_plus] injected tool reminder group=123 source=schedule has_tool=true tool_count=27 initial_tool_count=1 gated=true
-```
-
-如果 `has_tool=false`，说明本轮请求里没有带上这个工具，需要检查 persona/工具启用设置。普通日志不再打印完整工具样本；开启 `common.debug_log=true` 时，会输出工具样本和本轮注入的提醒提示词；`has_tool=false` 时也会输出工具样本。提醒提示只写入临时 `extra_user_content_parts`，不再写入 `system_prompt`，避免被其他系统提示混淆或引发提示词覆盖问题。
-
-AstrBot 启动 Agent 时会把这段临时提醒复制到 `run_context.messages`。插件在 `set_dynamic_group_card` 真正开始调用前，会同时从原请求和当前 Agent 上下文中只移除带 `[DynamicCardPlus]` 标记的提醒块，保留用户原消息和其他插件注入的内容。
-
-为减少提醒触发时把大量工具 schema 一起交给模型造成的首轮等待，插件只会对这一个请求的首轮临时使用仅包含 `set_dynamic_group_card` 的工具集。名片工具成功后，后续自然回复仍保留全部原始工具和原始 handler，但会暂时使用精简后的参数 schema：保留工具名、必要参数类型和参数结构，移除冗长描述、示例、默认值以及兼容代理不接受的非字符串 `enum` 标注。这样不会停用歌曲、图片或其它工具，也不会影响普通聊天；Agent 结束后才恢复原始完整工具集。
-
-触发改名片时会比普通聊天多一次模型请求：首轮决定调用 `set_dynamic_group_card`，工具执行后还要再请求一次模型，结合工具结果回复用户。因此“改名片接口成功后到最终回复”的耗时，通常对应后续模型请求或 Provider 重试，不是 QQ 改名片接口本身。提醒模式漏传 `suffix` 时，插件只使用配置的规则/候选池兜底，不会在工具内部再嵌套发起一次 LLM 请求。
-
-如果 AstrBot 全局 `provider_settings.tool_schema_mode` 使用 `skills_like`，插件会跳过这项门控以避免影响该模式的工具执行链；日志中的 `gated=false` 可据此判断。
-
-延迟排查可按同一条日志中的 `group`、`trigger`、`request` 和 `run_context` 对齐：
-
-- `bound reminder to agent` 的 `inject_to_agent_begin_seconds`：提醒注入到 Agent 真正开始。
-- `injected tool reminder` 中的 `initial_tool_count` 和 `gated`：首轮强制动作是否启用了请求级单工具门控；`tool_count` 是原始完整工具数量。
-- `reminder reached tool` 的 `wait_seconds`：提醒注入到模型返回工具调用；这里很长且同时出现 `Request timed out` 时，主要是在等待 Chat Provider 或其重试。
-- `prepared compact reminder follow-up tools`：名片工具完成后为本轮后续回复准备可执行的精简工具集；`reminder follow-up schema` 会记录精简前后的 schema 字符数。
-- `llm response ... tool_to_response_seconds`：从名片工具成功到后续模型返回最终回复的时间；配合 `followup_schema=compact` 判断是否已经走精简工具 schema。
-- `restored reminder follow-up tools`：Agent 结束后恢复原始完整工具集。这个恢复只影响当前请求，不会停用全局工具。
-- `reminder agent finished` 的 `tool_to_agent_done_seconds`：改名工具完成后到模型生成最终聊天回复。
-- `set_group_card succeeded` 前后的时间：OneBot 修改群名片接口自身耗时。
-
-## 完整名片模板
-
-两个模式各有独立完整模板。最终分隔符只由完整模板决定，不再提供额外的“系统指标分隔符”“动态后缀分隔符”，避免多个配置同时控制同一件事。
-
-`auto_update_mode.card_template` 的默认模板是：
-
-```text
-{bot_name} {cpu_text} {memory_text} {time_text} {suffixes}
-```
-
-`tool_reminder_mode.card_template` 的默认模板是：
-
-```text
-{bot_name} {manual_suffix}
-```
-
-### 可用变量
-
-| 变量 | 含义 | 示例 | 备注 |
-| --- | --- | --- | --- |
-| `{bot_name}` | `card_fields.bot_name` | `AstrBot` | 两个模式共用。 |
-| `{cpu_text}` | CPU 文本模板渲染结果 | `CPU 12.3%` | 由 `include_cpu` 和 `cpu_template` 控制。 |
-| `{memory_text}` | 内存文本模板渲染结果 | `MEM 45.6%` | 由 `include_memory` 和 `memory_template` 控制。 |
-| `{time_text}` | 时间文本模板渲染结果 | `08:30` | 由 `include_time` 和 `time_template` 控制。 |
-| `{metrics}` | 三个系统文本用空格拼接 | `CPU 12.3% MEM 45.6% 08:30` | 兼容便捷变量。 |
-| `{suffixes}` | 后缀用空格拼接 | `摸鱼中 日程:整理插件` | 会跳过空值、模板里已显式写出的后缀变量，也会避免和工具后缀原文相同的动态后缀重复出现。tool_reminder 模式中，每次工具设置后缀前会清理上一轮动态后缀状态。 |
-| `{cpu}` | 当前 CPU 使用率数值 | `12.3` | 不带 `%`。 |
-| `{memory}` | 当前内存使用率数值 | `45.6` | 不带 `%`。 |
-| `{time}` | 当前本地时间 | `08:30` | 格式为 `HH:MM`。 |
-| `{date}` | 当前本地日期 | `2026-07-15` | 格式为 `YYYY-MM-DD`。 |
-| `{weekday}` | 当前星期 | `星期三` | 中文星期文本。 |
-| `{manual_suffix}` | LLM 工具设置的后缀 | `摸鱼中` | 未设置或过期时为空。 |
-| `{thought_suffix}` | 会话想法摘要 | `在整理思路` | 工具 `source=thought` 或自动模式可写入。 |
-| `{schedule_suffix}` | 当天日程 | `整理插件` | 工具 `source=schedule` 或自动模式可写入。 |
-| `{whim_suffix}` | 随心后缀 | `慢慢加载灵感` | 工具 `source=whim` 或自动模式可写入。 |
-| `{static_suffix}` | 固定后缀 | `在线` | 来自 `card_fields.static_suffix`。 |
-
-### 示例
-
-只显示基础名字和工具后缀：
-
-```text
-{bot_name} {manual_suffix}
-```
-
-自定义系统指标分隔符：
-
-```text
-{bot_name} | {cpu_text} | {memory_text} | {time_text} | {suffixes}
-```
-
-完全手写指标格式：
-
-```text
-{bot_name} CPU:{cpu}% MEM:{memory}% {time} {manual_suffix}
-```
-
-## LLM 工具
-
-工具名：
-
-```text
-set_dynamic_group_card
-```
-
-你可以自然语言要求 bot 改名片，例如：
-
-```text
-把你的群名片后缀改成“摸鱼中”
-根据我们刚才聊天的内容，给你的群名片加个想法后缀
-把群名片改成今天的日程状态
-随便给自己换个可爱的群名片后缀
-```
-
-工具参数：
-
-- `mode=suffix`：设置短后缀。
-- `mode=full_card`：设置完整群名片，需要开启 `llm_tool.allow_full_card`。
-- `mode=clear_manual`：清除 LLM 工具设置的手动内容。
-- `source=manual`：使用传入的 `suffix`。
-- `source=thought`：优先使用 bot 根据当前会话直接传入的 `suffix`；未传时才按 `thought_summary` 配置兜底生成。
-- `source=schedule`：优先使用 bot 根据当天日程状态直接传入的 `suffix`；未传时才按 `daily_schedule` 配置兜底生成。
-- `source=whim`：优先使用 bot 随心所欲直接传入的 `suffix`；未传时才按 `whim_suffix` 配置兜底生成。
-- `source=random`：不传 `suffix` 时在 `thought`、`schedule`、`whim` 中随机兜底生成。
-
-`mode=suffix` 会按当前运行模式的完整名片模板渲染最终名片：`auto_update` 使用 `auto_update_mode.card_template`，`tool_reminder` 使用 `tool_reminder_mode.card_template`。`tool_reminder` 模式中，第二次 `mode=suffix` 会替换上一次工具/动态后缀状态，不会叠加旧后缀。
-
-`mode=full_card` 只有在 `llm_tool.allow_full_card=true` 时生效；它会直接使用传入的完整名片，不再套完整名片模板。默认关闭。
-
-工具调用成功后会返回“已把当前群名片改为……”，因此 bot 会知道这次名片是自己主动改的。
-
-## 动态来源
-
-### thought_summary
-
-根据当前会话最近消息生成一个短后缀。自动模式中需要开启 `auto_update_mode.include_thought_summary`；工具模式中，提醒会优先要求 bot 自己根据最近对话直接传 `suffix`，这里只作为漏传时的兜底。
-
-### daily_schedule
-
-`daily_schedule.mode` 支持：
-
-- `rules`：按 `schedule_lines` 规则匹配当天日程。
-- `llm`：让 bot/LLM 生成当天日程后缀，失败时回落到规则和兜底文本。
-
-工具提醒模式中，日程提醒会优先要求 bot 自己概括当天状态并直接传 `suffix`；这里的规则和 LLM 生成主要用于自动模式和漏传 `suffix` 时兜底。
-
-默认规则包含一周七天：
-
-```text
-周一=整理周计划
-周二=推进待办
-周三=补充能量
-周四=检查进度
-周五=准备周末模式
-周六=自由活动
-周日=慢慢充电
-```
-
-你也可以加日期规则：
-
-```text
-2026-07-15=今晚整理插件
-07-15=纪念日模式
-星期四=周四日程
-周五=准备周末模式
-daily=自由活动
-```
-
-日程内容里可用 `{date}`、`{time}`、`{weekday}`。
-
-如果没有命中任何规则，会使用 `daily_schedule.empty_text`，默认是 `自由活动`。
-
-### whim_suffix
-
-- `mode=pool`：从候选池随机选择。
-- `mode=llm`：让模型生成，失败时回退到候选池。
-
-工具提醒模式中，随心提醒会优先要求 bot 自己随意传 `suffix`；这里主要用于自动模式和漏传 `suffix` 时兜底。
-
-## 更新记录
-
-见 [CHANGELOG.md](CHANGELOG.md)。
+基于 [botName](https://github.com/zgojin/astrbot_plugin_botName)；来源与许可说明见 [NOTICE.md](NOTICE.md)。

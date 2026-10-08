@@ -16,7 +16,7 @@
           "auto_update",
           "tool_reminder"
         ],
-        "hint": "二选一。auto_update=插件自动改群名片；tool_reminder=插件不自动改，只定时提醒 bot 主动调用 LLM 工具。AstrBot 当前配置面板只支持静态隐藏，不能按这里的选择动态隐藏另一个模式分组；未选模式的配置不会生效。"
+        "hint": "auto_update：到间隔后，在机器人下一次回复时更新；tool_reminder：由模型调用工具更新。未选模式的配置不会生效。"
       },
       "max_card_length": {
         "type": "int",
@@ -24,11 +24,11 @@
         "default": 60,
         "min": 8,
         "max": 500,
-        "hint": "QQ 群名片实际长度限制可能更低，建议保持精简。"
+        "hint": "字符数上限；同时受 UTF-8 字节上限约束，中文和表情会占多个字节。"
       },
       "retry_count": {
         "type": "int",
-        "description": "调用 set_group_card 失败后的重试次数",
+        "description": "每轮最多尝试次数（包含首次）",
         "default": 3,
         "min": 1,
         "max": 10
@@ -55,6 +55,43 @@
         },
         "default": [],
         "hint": "填完整 unified_msg_origin，可用于更细粒度禁用。"
+      },
+      "max_card_bytes": {
+        "type": "int",
+        "description": "名片 UTF-8 字节上限",
+        "default": 60,
+        "min": 16,
+        "max": 240,
+        "hint": "默认 60 是保守值，中文通常占 3 字节，表情可能更多。自动截短，不切坏 Unicode 字符；遇到限制请缩短名片。"
+      },
+      "api_timeout_seconds": {
+        "type": "int",
+        "description": "单次接口超时秒数",
+        "default": 10,
+        "min": 3,
+        "max": 30
+      },
+      "retry_delay_seconds": {
+        "type": "int",
+        "description": "首次重试等待秒数",
+        "default": 2,
+        "min": 1,
+        "max": 30,
+        "hint": "后续等待逐次翻倍，最长 30 秒；明确的权限或参数错误不重复提交。"
+      },
+      "failure_cooldown_seconds": {
+        "type": "int",
+        "description": "失败后暂停改名片秒数",
+        "default": 300,
+        "min": 30,
+        "max": 3600,
+        "hint": "自动更新和工具共用，避免每条消息都重复触发失败。"
+      },
+      "verify_after_write": {
+        "type": "bool",
+        "description": "修改后回读确认名片",
+        "default": true,
+        "hint": "通过 get_group_member_info 检查实际名片。接口报错时也会回读，避免已生效却误报失败。"
       }
     }
   },

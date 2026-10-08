@@ -7,11 +7,11 @@ from types import SimpleNamespace
 from astrbot.api import FunctionTool, ToolSet
 from astrbot.core.agent.message import Message, TextPart
 
-from main import (
+from dynamic_card_plugin.main import (
     CARD_HINT_MARKER,
     CARD_TOOL_NAME,
-    DynamicGroupCardTool,
     DynamicCardPlusPlugin,
+    DynamicGroupCardTool,
     GroupCardState,
     ReminderBinding,
     _compact_json_schema,

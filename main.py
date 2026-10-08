@@ -19,15 +19,17 @@ from astrbot.api import AstrBotConfig, FunctionTool, ToolSet, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Plain
 from astrbot.api.provider import LLMResponse, ProviderRequest
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star
 from astrbot.core.agent.message import TextPart
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.astr_agent_context import AstrAgentContext
 from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
+from .onebot import CardUpdateResult, OneBotCardClient, clean_card, failure_detail
+
 PLUGIN_ID = "astrbot_plugin_dynamic_card_plus"
-PLUGIN_VERSION = "0.8.18"
+PLUGIN_VERSION = "0.9.0"
 PLUGIN_DESC = "增强版动态群名片插件：支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus"
 
@@ -35,6 +37,11 @@ UPSTREAM_REPO = "https://github.com/zgojin/astrbot_plugin_botName"
 CARD_TOOL_NAME = "set_dynamic_group_card"
 CARD_HINT_MARKER = "[DynamicCardPlus]"
 REMINDER_DYNAMIC_SOURCES = ("thought", "schedule", "whim")
+CARD_CONTENT_FIELDS = (
+    "manual_suffix", "manual_full_card", "manual_until", "last_tool_reason",
+    "thought_suffix", "thought_generated_at", "schedule_suffix", "schedule_generated_at",
+    "whim_suffix", "whim_generated_at",
+)
 DEFAULT_TOOL_DESCRIPTION = (
     "修改当前 QQ 群里的群名片。"
     "可以设置一个短后缀表达此刻想法、心情、日程状态。"
@@ -86,7 +93,7 @@ def _read_int(
 ) -> int:
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         number = default
     return min(maximum, max(minimum, number))
 
@@ -141,7 +148,7 @@ def _render_template(template: str, values: dict[str, Any]) -> str:
         return template.format(**values)
     except Exception as exc:
         logger.warning("[%s] template render failed: %r | template=%s", PLUGIN_ID, exc, template)
-        return template
+        return ""
 
 
 def _compact_spaces(text: str) -> str:
@@ -157,7 +164,11 @@ def _compact_json_schema(value: Any) -> Any:
     """Keep tool argument structure while dropping verbose schema annotations."""
     if isinstance(value, dict):
         return {
-            key: _compact_json_schema(item)
+            key: (
+                {name: _compact_json_schema(schema) for name, schema in item.items()}
+                if key in {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas"}
+                and isinstance(item, dict) else _compact_json_schema(item)
+            )
             for key, item in value.items()
             if key not in _COMPACT_SCHEMA_DROP_KEYS
             and not (
@@ -264,6 +275,11 @@ class PluginSettings:
     operation_mode: str
     max_card_length: int
     retry_count: int
+    max_card_bytes: int
+    api_timeout_seconds: int
+    retry_delay_seconds: int
+    failure_cooldown_seconds: int
+    verify_after_write: bool
     blacklist_group_ids: set[str]
     blacklist_unified_origins: set[str]
 
@@ -322,6 +338,10 @@ class PluginSettings:
 
 @dataclass
 class GroupCardState:
+    update_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    retry_after: float = 0.0
+    last_error: str = ""
+    last_verified: bool = False
     last_update_at: float = 0.0
     last_card: str = ""
     last_tool_update_at: float = 0.0
@@ -388,6 +408,7 @@ class ReminderBinding:
     request_parts: Any
     hint_text: str
     request_id: str
+    state_key: str = ""
     original_func_tool: Any = None
     initial_tool_gate_applied: bool = False
     initial_tool_count: int = 0
@@ -457,7 +478,6 @@ class DynamicGroupCardTool(FunctionTool[AstrAgentContext]):
         return await self.plugin.handle_tool_call(event, kwargs)
 
 
-@register(PLUGIN_ID, "Huli3", PLUGIN_DESC, PLUGIN_VERSION, PLUGIN_REPO)
 class DynamicCardPlusPlugin(Star):
     """Dynamic group card plugin for aiocqhttp group chats."""
 
@@ -483,6 +503,11 @@ class DynamicCardPlusPlugin(Star):
         logger.info("[%s] initialized; upstream=%s", PLUGIN_ID, UPSTREAM_REPO)
 
     async def terminate(self) -> None:
+        for binding in list(self._reminder_bindings.values()):
+            self._restore_reminder_tools(binding, "plugin_unload")
+            self._remove_hint_from_request(binding)
+            if binding.run_context is not None:
+                self._remove_hint_from_run_context(binding.run_context, binding.hint_text)
         self._reminder_bindings.clear()
         for task in list(self._active_cron_register_tasks.values()):
             task.cancel()
@@ -502,7 +527,6 @@ class DynamicCardPlusPlugin(Star):
             )
         )
 
-    @filter.llm_tool(name=CARD_TOOL_NAME)
     async def set_dynamic_group_card(
         self,
         event: AstrMessageEvent,
@@ -697,13 +721,16 @@ class DynamicCardPlusPlugin(Star):
         if settings.tool_reminder_active_cron_expression:
             return settings.tool_reminder_active_cron_expression
 
-        minutes = max(1, round(settings.tool_reminder_interval_seconds / 60))
-        if minutes < 60:
+        minutes = max(1, (settings.tool_reminder_interval_seconds + 59) // 60)
+        if minutes < 60 and 60 % minutes == 0:
             return f"*/{minutes} * * * *"
-        if minutes % 60 == 0:
-            hours = max(1, min(23, minutes // 60))
-            return f"0 */{hours} * * *"
-        return "*/30 * * * *"
+        if minutes == 1440:
+            return "0 0 * * *"
+        if minutes % 60 == 0 and minutes < 1440:
+            hours = minutes // 60
+            if 24 % hours == 0:
+                return f"0 */{hours} * * *"
+        raise ValueError("这个提醒间隔无法换算为等间隔 cron，请填写 active_cron_expression；例如每 30 分钟用 */30 * * * *")
 
     def _pick_tool_reminder_source(self, settings: PluginSettings) -> str:
         sources = settings.tool_reminder_sources or REMINDER_DYNAMIC_SOURCES
@@ -816,6 +843,11 @@ class DynamicCardPlusPlugin(Star):
                 minimum=1,
                 maximum=10,
             ),
+            max_card_bytes=_read_int(common.get("max_card_bytes"), 60, minimum=16, maximum=240),
+            api_timeout_seconds=_read_int(common.get("api_timeout_seconds"), 10, minimum=3, maximum=30),
+            retry_delay_seconds=_read_int(common.get("retry_delay_seconds"), 2, minimum=1, maximum=30),
+            failure_cooldown_seconds=_read_int(common.get("failure_cooldown_seconds"), 300, minimum=30, maximum=3600),
+            verify_after_write=_read_bool(common.get("verify_after_write"), True),
             blacklist_group_ids=set(
                 _read_list(common.get("blacklist_group_ids", legacy_general.get("blacklist_group_ids")), [])
             ),
@@ -981,7 +1013,7 @@ class DynamicCardPlusPlugin(Star):
         if self._is_blacklisted(event, group_id, settings):
             return
 
-        state = self._states[_normalize_id(group_id)]
+        state = self._states[self._state_key(event, group_id, self_id)]
         await self._remember_group_target(state, event, client, group_id, self_id, settings)
         self._remember_user_message(state, event, settings)
         if settings.operation_mode != "tool_reminder":
@@ -991,6 +1023,8 @@ class DynamicCardPlusPlugin(Star):
             return
 
         now = time.time()
+        if now < state.retry_after:
+            return
         if now - state.last_tool_reminder_at < settings.tool_reminder_interval_seconds:
             return
 
@@ -1010,6 +1044,10 @@ class DynamicCardPlusPlugin(Star):
             reason="群名片自主管理提醒",
             trigger_id=trigger_id,
         )
+        tool_names = self._request_tool_names(req)
+        if CARD_TOOL_NAME not in tool_names:
+            logger.debug("[%s] reminder skipped: card tool is unavailable in this request", PLUGIN_ID)
+            return
         hint_part = self._append_provider_hint(req, hint)
         if hint_part is None:
             return
@@ -1033,6 +1071,7 @@ class DynamicCardPlusPlugin(Star):
             request_parts=getattr(req, "extra_user_content_parts", None),
             hint_text=hint,
             request_id=request_id,
+            state_key=self._state_key(event, group_id, self_id),
             original_func_tool=original_func_tool,
             initial_tool_gate_applied=tool_gate_applied,
             initial_tool_count=initial_tool_count,
@@ -1508,7 +1547,7 @@ class DynamicCardPlusPlugin(Star):
         binding = self._find_reminder_binding(event)
         if binding is None:
             return
-        state = self._states[binding.group_id]
+        state = self._states[binding.state_key or binding.group_id]
         self._consume_pending_reminder(event, state, binding.group_id, time.time())
 
     @filter.on_agent_done(desc="清理未调用工具时残留的群名片提醒")
@@ -1640,12 +1679,13 @@ class DynamicCardPlusPlugin(Star):
         if group_context is None:
             return
 
-        _, group_id, _ = group_context
-        state = self._states[_normalize_id(group_id)]
+        _, group_id, self_id = group_context
+        state = self._states[self._state_key(event, group_id, self_id)]
         original = _clean_text(getattr(response, "completion_text", ""))
         cleaned, stripped_tool_call = _strip_leaked_tool_call_blocks(original)
         now = time.time()
-        pending_followup = now <= state.pending_tool_followup_until
+        completed_at = event.get_extra("dynamic_card_completed_at", 0)
+        pending_followup = bool(completed_at and now - completed_at <= 300)
         reminder_binding = self._find_reminder_binding(event) if pending_followup else None
 
         if settings.debug_log:
@@ -1679,6 +1719,7 @@ class DynamicCardPlusPlugin(Star):
 
         if pending_followup:
             state.pending_tool_followup_until = 0.0
+            event.set_extra("dynamic_card_completed_at", 0)
             draft_cleaned = _extract_visible_reply_from_leaked_draft(cleaned)
             if draft_cleaned != cleaned:
                 cleaned = draft_cleaned
@@ -1689,7 +1730,8 @@ class DynamicCardPlusPlugin(Star):
         response.completion_text = cleaned
         chain = getattr(response, "result_chain", None)
         if hasattr(chain, "chain"):
-            chain.chain = [Plain(cleaned)] if cleaned else []
+            non_text = [part for part in chain.chain if not isinstance(part, Plain)]
+            chain.chain = ([Plain(cleaned)] if cleaned else []) + non_text
         logger.info(
             "[%s] sanitized leaked group card tool response group=%s stripped_tool_call=%s pending_followup=%s",
             PLUGIN_ID,
@@ -1700,6 +1742,8 @@ class DynamicCardPlusPlugin(Star):
 
     @filter.on_decorating_result(desc="自动模式下在发送回复前刷新 QQ 群名片")
     async def modify_card_before_send(self, event: AstrMessageEvent) -> None:
+        if event.get_extra("dynamic_card_readonly", False):
+            return
         settings = self._settings()
         if not settings.enabled:
             return
@@ -1712,7 +1756,7 @@ class DynamicCardPlusPlugin(Star):
         if self._is_blacklisted(event, group_id, settings):
             return
 
-        group_key = _normalize_id(group_id)
+        group_key = self._state_key(event, group_id, self_id)
         state = self._states[group_key]
         await self._remember_group_target(state, event, client, group_id, self_id, settings)
         self._remember_exchange(state, event, settings)
@@ -1720,34 +1764,38 @@ class DynamicCardPlusPlugin(Star):
         if settings.operation_mode != "auto_update":
             return
 
-        now = time.time()
-        if now - state.last_update_at < settings.auto_update_interval_seconds:
-            return
+        async with state.update_lock:
+            now = time.time()
+            if now < state.retry_after:
+                return
+            if now - state.last_update_at < settings.auto_update_interval_seconds:
+                return
 
-        await self._refresh_dynamic_suffixes(event, state, settings, now)
-        new_card = self._build_card(state, settings)
-        if not new_card:
-            logger.info("[%s] group=%s generated empty card, skipped", PLUGIN_ID, group_id)
-            state.last_update_at = now
-            return
+            await self._refresh_dynamic_suffixes(event, state, settings, now)
+            new_card = self._build_card(state, settings)
+            if not new_card:
+                logger.info("[%s] group=%s generated empty card, skipped", PLUGIN_ID, group_id)
+                state.last_update_at = now
+                return
 
-        if new_card == state.last_card:
-            state.last_update_at = now
-            return
+            if new_card == state.last_card:
+                state.last_update_at = now
+                return
 
-        if settings.debug_log:
-            logger.info("[%s] updating group=%s card=%s", PLUGIN_ID, group_id, new_card)
+            if settings.debug_log:
+                logger.info("[%s] updating group=%s card=%s", PLUGIN_ID, group_id, new_card)
 
-        ok = await self._set_group_card(
-            client=client,
-            group_id=group_id,
-            self_id=self_id,
-            card=new_card,
-            retry_count=settings.retry_count,
-        )
-        if ok:
-            state.last_card = new_card
-            state.last_update_at = now
+            ok = await self._set_group_card(
+                client=client,
+                group_id=group_id,
+                self_id=self_id,
+                card=new_card,
+                retry_count=settings.retry_count,
+            )
+            self._record_update_result(state, ok, settings)
+            if ok:
+                state.last_card = new_card
+                state.last_update_at = time.time()
 
     async def handle_tool_call(
         self,
@@ -1764,21 +1812,37 @@ class DynamicCardPlusPlugin(Star):
         if group_context is None:
             return "失败：只能在 aiocqhttp 的 QQ 群聊里修改群名片。"
 
-        client, group_id, self_id = group_context
+        _, group_id, self_id = group_context
         if self._is_blacklisted(event, group_id, settings):
             return f"失败：群 {group_id} 在黑名单中，不能使用动态名片插件。"
 
-        group_key = _normalize_id(group_id)
+        group_key = self._state_key(event, group_id, self_id)
         state = self._states[group_key]
+        async with state.update_lock:
+            try:
+                return await self._handle_tool_call_locked(event, kwargs, settings, group_context, state)
+            finally:
+                binding = self._find_reminder_binding(event)
+                if binding is not None and not binding.tool_completed_at:
+                    self._restore_reminder_tools(binding, "tool_not_completed")
+
+    async def _handle_tool_call_locked(
+        self, event: AstrMessageEvent, kwargs: dict[str, Any],
+        settings: PluginSettings, group_context: tuple[Any, str, str],
+        state: GroupCardState,
+    ) -> str:
+        client, group_id, self_id = group_context
         await self._remember_group_target(state, event, client, group_id, self_id, settings)
         now = time.time()
         reminder_consumed = self._consume_pending_reminder(event, state, group_id, now)
         reminder_binding = self._find_reminder_binding(event)
         if reminder_binding is not None and (
             not (reminder_consumed or reminder_binding.consumed)
-            or reminder_binding.group_id != group_key
+            or reminder_binding.group_id != group_id
         ):
             reminder_binding = None
+        if now < state.retry_after:
+            return f"失败：上次接口调用失败，约 {int(state.retry_after - now) + 1} 秒后可再试。{state.last_error}"
         cooldown_left = settings.llm_tool_min_interval_seconds - (now - state.last_tool_update_at)
         if cooldown_left > 0:
             if reminder_binding is not None:
@@ -1786,7 +1850,16 @@ class DynamicCardPlusPlugin(Star):
             return f"失败：刚刚已经改过群名片，请约 {int(cooldown_left)} 秒后再试。"
 
         mode = _clean_text(kwargs.get("mode"), "suffix")
-        reason = _clean_text(kwargs.get("reason"))
+        if mode not in {"suffix", "full_card", "clear_manual"}:
+            return "失败：mode 只能是 suffix、full_card 或 clear_manual，未修改群名片。"
+        source = _clean_text(kwargs.get("source"), "manual")
+        if mode == "suffix" and source not in {"manual", "thought", "schedule", "whim", "random"}:
+            return "失败：不支持这个后缀来源，未修改群名片。"
+        # Work on a candidate. Rejected/failed/cancelled calls must preserve the
+        # existing suffix, expiry and generated content.
+        target_state = state
+        state = copy.copy(target_state)
+        reason = _truncate(_clean_text(kwargs.get("reason")), 200)
         duration_seconds = _read_int(
             kwargs.get("duration_seconds"),
             settings.llm_tool_manual_ttl_seconds,
@@ -1872,17 +1945,22 @@ class DynamicCardPlusPlugin(Star):
             card=new_card,
             retry_count=settings.retry_count,
         )
+        self._record_update_result(target_state, ok, settings)
         if not ok:
             if reminder_binding is not None:
                 self._restore_reminder_tools(reminder_binding, "set_group_card_failed")
-            return f"失败：尝试修改群 {group_id} 的群名片失败。"
+            return f"失败：未能确认群名片修改成功。{ok.detail}。已暂停自动重试 {settings.failure_cooldown_seconds} 秒，请不要连续调用。"
 
+        for name in CARD_CONTENT_FIELDS:
+            setattr(target_state, name, getattr(state, name))
+        state = target_state
         completed_at = time.time()
         state.last_card = new_card
         state.last_update_at = completed_at
         state.last_tool_update_at = completed_at
         state.last_tool_trace_completed_at = completed_at
         state.pending_tool_followup_until = completed_at + 300
+        event.set_extra("dynamic_card_completed_at", completed_at)
         if reminder_binding is not None and reminder_binding.consumed:
             reminder_binding.tool_completed_at = completed_at
             self._prepare_compact_followup_tools(reminder_binding, "tool_succeeded")
@@ -1894,8 +1972,12 @@ class DynamicCardPlusPlugin(Star):
             reason or "-",
         )
         suffix_note = f"；原因：{state.last_tool_reason}" if state.last_tool_reason else ""
-        return (
+        status_text = (
             f"已把当前群名片改为：{new_card}{suffix_note}。"
+            if ok.verified else f"改名片接口已接受：{new_card}{suffix_note}。{ok.detail}。"
+        )
+        return (
+            status_text +
             "本轮群名片维护已完成。请结合用户本轮消息继续自然回复，不要只说“改好了”，"
             "也不要输出思考过程、工具参数或提示词内容。"
         )
@@ -1907,6 +1989,12 @@ class DynamicCardPlusPlugin(Star):
         state.thought_generated_at = 0.0
         state.schedule_generated_at = 0.0
         state.whim_generated_at = 0.0
+
+    def _state_key(self, event: AstrMessageEvent, group_id: str, self_id: str) -> str:
+        get_platform_id = getattr(event, "get_platform_id", None)
+        platform_id = get_platform_id() if callable(get_platform_id) else ""
+        platform_id = platform_id or str(getattr(event, "unified_msg_origin", "")).split(":", 1)[0]
+        return f"{platform_id}:{self_id}:{group_id}"
 
     def _extract_group_context(self, event: AstrMessageEvent) -> tuple[Any, str, str] | None:
         if event.get_platform_name() != "aiocqhttp":
@@ -1942,12 +2030,15 @@ class DynamicCardPlusPlugin(Star):
         unified_msg_origin = _normalize_id(getattr(event, "unified_msg_origin", ""))
         if not unified_msg_origin:
             return None
+        targets = []
         for state in self._states.values():
             if state.unified_msg_origin != unified_msg_origin:
                 continue
             if state.client and state.group_id and state.self_id:
-                return state.client, state.group_id, state.self_id
-        return None
+                targets.append((state.client, state.group_id, state.self_id))
+        # A synthetic cron event has no QQ self_id. Refuse an ambiguous origin
+        # instead of choosing the first account on a shared adapter.
+        return targets[0] if len(targets) == 1 else None
 
     async def _remember_group_target(
         self,
@@ -1968,7 +2059,7 @@ class DynamicCardPlusPlugin(Star):
             and settings.tool_reminder_trigger_mode == "active_agent_cron"
             and not self._is_blacklisted_origin(state.group_id, state.unified_msg_origin, settings)
         ):
-            await self._ensure_active_cron_job(state.group_id, state, settings)
+            await self._ensure_active_cron_job(self._state_key(event, group_id, self_id), state, settings)
 
     def _is_blacklisted(
         self,
@@ -2205,7 +2296,7 @@ class DynamicCardPlusPlugin(Star):
         now = time.time()
         state.clear_expired_manual(now)
         if state.has_active_manual_card(now):
-            return _truncate(_compact_spaces(state.manual_full_card), settings.max_card_length)
+            return clean_card(state.manual_full_card, settings.max_card_length, settings.max_card_bytes)
 
         metrics = self._collect_metrics()
         cpu_text = _render_template(settings.cpu_template, metrics) if settings.include_cpu else ""
@@ -2250,7 +2341,7 @@ class DynamicCardPlusPlugin(Star):
             "static_suffix": settings.static_suffix,
         }
         card = _render_template(card_template, values)
-        return _truncate(_compact_spaces(card), settings.max_card_length)
+        return clean_card(card, settings.max_card_length, settings.max_card_bytes)
 
     def _active_card_template(self, settings: PluginSettings) -> str:
         if settings.operation_mode == "tool_reminder":
@@ -2355,14 +2446,13 @@ class DynamicCardPlusPlugin(Star):
         if not lines:
             return ""
 
-        exact_keys = {
-            now.strftime("%Y-%m-%d"),
-            now.strftime("%m-%d"),
-            self._weekday_name(now),
-            self._weekday_name(now, short=True),
-            now.strftime("%A").lower(),
-            now.strftime("%a").lower(),
-        }
+        key_groups = (
+            {now.strftime("%Y-%m-%d")},
+            {now.strftime("%m-%d")},
+            {self._weekday_name(now), self._weekday_name(now, short=True),
+             now.strftime("%A").lower(), now.strftime("%a").lower()},
+        )
+        matches: dict[int, str] = {}
         fallback = ""
         for line in lines:
             key, value = self._split_schedule_line(line)
@@ -2373,9 +2463,11 @@ class DynamicCardPlusPlugin(Star):
             if normalized_key in {"daily", "everyday", "每天", "每日"}:
                 fallback = fallback or value
                 continue
-            if normalized_key in exact_keys:
-                return value
-        return fallback
+            for priority, keys in enumerate(key_groups):
+                if normalized_key in keys:
+                    matches.setdefault(priority, value)
+                    break
+        return matches[min(matches)] if matches else fallback
 
     def _split_schedule_line(self, line: str) -> tuple[str, str]:
         text = _clean_text(line)
@@ -2482,48 +2574,86 @@ class DynamicCardPlusPlugin(Star):
         return _first_clean_line(text, max_length)
 
     async def _set_group_card(
-        self,
-        *,
-        client: Any,
-        group_id: str,
-        self_id: str,
-        card: str,
-        retry_count: int,
-    ) -> bool:
-        payload = {
-            "group_id": group_id,
-            "user_id": self_id,
-            "card": card,
-        }
-        for retry in range(retry_count):
-            try:
-                result = await client.api.call_action("set_group_card", **payload)
-                logger.info(
-                    "[%s] set_group_card succeeded group=%s card=%s result=%s",
-                    PLUGIN_ID,
-                    group_id,
-                    card,
-                    result,
-                )
-                return True
-            except Exception as exc:
-                if retry < retry_count - 1:
-                    logger.warning(
-                        "[%s] set_group_card retry=%s group=%s error=%r",
-                        PLUGIN_ID,
-                        retry + 1,
-                        group_id,
-                        exc,
-                    )
-                else:
-                    logger.error(
-                        "[%s] set_group_card failed group=%s retries=%s error=%r",
-                        PLUGIN_ID,
-                        group_id,
-                        retry_count,
-                        exc,
-                    )
-        return False
+        self, *, client: Any, group_id: str, self_id: str, card: str, retry_count: int,
+    ) -> CardUpdateResult:
+        settings = self._settings()
+        result = await OneBotCardClient(
+            client, self_id, timeout=settings.api_timeout_seconds,
+        ).update(
+            group_id, card, attempts=retry_count,
+            retry_delay=settings.retry_delay_seconds, verify=settings.verify_after_write,
+        )
+        log = logger.info if result.ok else logger.warning
+        log("[%s] set_group_card group=%s self_id=%s ok=%s verified=%s attempts=%s chars=%s bytes=%s detail=%s",
+            PLUGIN_ID, group_id, self_id, result.ok, result.verified, result.attempts,
+            len(card), len(card.encode("utf-8")), result.detail or "-")
+        return result
+
+    def _record_update_result(
+        self, state: GroupCardState, result: CardUpdateResult, settings: PluginSettings,
+    ) -> None:
+        state.last_error = result.detail
+        state.last_verified = result.verified
+        state.retry_after = 0 if result.ok else time.time() + settings.failure_cooldown_seconds
+
+    @filter.command("名片预览")
+    async def preview_card(self, event: AstrMessageEvent, suffix: str = ""):
+        """预览当前模板，可在命令后填写一个后缀；不会修改 QQ 群名片。"""
+        event.set_extra("dynamic_card_readonly", True)
+        context = self._extract_group_context(event)
+        if context is None:
+            yield event.plain_result("请在 OneBot 接入的 QQ 群里使用。")
+            return
+        _, group_id, self_id = context
+        settings = self._settings()
+        if self._is_blacklisted(event, group_id, settings):
+            yield event.plain_result("这个群或会话已禁用动态名片。")
+            return
+        state = copy.copy(self._states[self._state_key(event, group_id, self_id)])
+        if suffix:
+            state.manual_full_card = ""
+            state.manual_suffix = suffix
+            state.manual_until = 0
+            if settings.operation_mode == "tool_reminder":
+                self._clear_dynamic_suffixes(state)
+        card = self._build_card(state, settings)
+        yield event.plain_result(f"名片预览：{card or '（空）'}\n{len(card)} 个字符 / {len(card.encode('utf-8'))} 字节；未修改群名片。")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("名片检查")
+    async def diagnose_card(self, event: AstrMessageEvent):
+        """检查连接、账号、当前群名片及最近的更新结果，不执行改名。"""
+        event.set_extra("dynamic_card_readonly", True)
+        context = self._extract_group_context(event)
+        if context is None:
+            yield event.plain_result("请在 OneBot 接入的 QQ 群里使用。")
+            return
+        client, group_id, self_id = context
+        settings = self._settings()
+        state = self._states[self._state_key(event, group_id, self_id)]
+        api = OneBotCardClient(client, self_id, timeout=settings.api_timeout_seconds)
+        mode = "自动更新（回复时触发）" if settings.operation_mode == "auto_update" else "提醒模型改名片"
+        enabled = settings.enabled and not self._is_blacklisted(event, group_id, settings)
+        lines = [f"动态名片：{'启用' if enabled else '禁用'}；{mode}", f"群号：{group_id}；机器人：{self_id}"]
+        try:
+            version = await api.call("get_version_info")
+            if isinstance(version, dict):
+                lines.append(f"客户端：{version.get('app_name', '未知')} {version.get('app_version', '')}")
+        except Exception as exc:
+            lines.append(f"客户端信息：{failure_detail(exc)[0]}")
+        try:
+            member = await api.member(group_id)
+            lines.append(f"当前名片：{member['card'] or '（未设置）'}；群角色：{member.get('role', '未知')}")
+        except Exception as exc:
+            lines.append(f"读取成员信息：{failure_detail(exc)[0]}")
+        if state.last_card:
+            lines.append(f"上次提交：{state.last_card}；{'已回读确认' if state.last_verified else '未回读确认'}")
+        if state.last_error:
+            lines.append(f"最近提示：{state.last_error}")
+        if state.retry_after > time.time():
+            lines.append(f"失败冷却剩余：{int(state.retry_after - time.time()) + 1} 秒")
+        lines.append("本次只检查，不修改群名片。")
+        yield event.plain_result("\n".join(lines))
 
     def _weekday_name(self, when: datetime, *, short: bool = False) -> str:
         names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]

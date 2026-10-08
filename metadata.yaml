@@ -1,7 +1,9 @@
 name: astrbot_plugin_dynamic_card_plus
-display_name: Dynamic Card Plus
+display_name: 灵动名片
 desc: 增强版动态群名片插件，支持系统信息、日程、想法摘要、随心后缀和 LLM 主动改名片
-version: v0.8.18
+version: v0.9.0
 author: Huli3
 repo: https://github.com/Whereis-Alice/astrbot_plugin_dynamic_card_plus
-astrbot_version: ">=4.16,<5"
+astrbot_version: ">=4.25,<5"
+support_platforms:
+  - aiocqhttp
